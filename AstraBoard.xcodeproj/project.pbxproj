@@ -1,0 +1,401 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AAAPPBUILD /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAPPFILE /* App.swift */; };
+		AAASSETSBUILD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AAASSETSFILE /* Assets.xcassets */; };
+		AABOARDVBUILD /* BoardViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABOARDVFILE /* BoardViews.swift */; };
+		AAENTRYVBUILD /* EntryRenderers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAENTRYVFILE /* EntryRenderers.swift */; };
+		AAGEOMBUILD /* Geometry+Utils.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAGEOMFILE /* Geometry+Utils.swift */; };
+		AAHUDPANBUILD /* HUDAndPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAHUDPANFILE /* HUDAndPanels.swift */; };
+		AAMODELBUILD /* BoardModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAMODELFILE /* BoardModels.swift */; };
+		AASERVBUILD /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASERVFILE /* Services.swift */; };
+		AASTOREBUILD /* BoardStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASTOREFILE /* BoardStore.swift */; };
+		AATEXTMETRICSBUILD /* TextEntryMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATEXTMETRICSFILE /* TextEntryMetrics.swift */; };
+		AATOOLBUILD /* ToolPaletteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATOOLFILE /* ToolPaletteView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AAAPPFILE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		AAASSETSFILE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AABOARDVFILE /* BoardViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardViews.swift; sourceTree = "<group>"; };
+		AAENTRYVFILE /* EntryRenderers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryRenderers.swift; sourceTree = "<group>"; };
+		AAGEOMFILE /* Geometry+Utils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Geometry+Utils.swift"; sourceTree = "<group>"; };
+		AAHUDPANFILE /* HUDAndPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HUDAndPanels.swift; sourceTree = "<group>"; };
+		AAINFOFILE /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AAMODELFILE /* BoardModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardModels.swift; sourceTree = "<group>"; };
+		AAPRODUCT /* AstraBoard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AstraBoard.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AASERVFILE /* Services.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services.swift; sourceTree = "<group>"; };
+		AASTOREFILE /* BoardStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardStore.swift; sourceTree = "<group>"; };
+		AATEXTMETRICSFILE /* TextEntryMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEntryMetrics.swift; sourceTree = "<group>"; };
+		AATOOLFILE /* ToolPaletteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolPaletteView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AAFRAMEWORKS /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AABOARDGROUP /* Board */ = {
+			isa = PBXGroup;
+			children = (
+				AABOARDVFILE /* BoardViews.swift */,
+				AAENTRYVFILE /* EntryRenderers.swift */,
+			);
+			path = Board;
+			sourceTree = "<group>";
+		};
+		AACOMPONENTSGROUP /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				AAHUDPANFILE /* HUDAndPanels.swift */,
+				AATOOLFILE /* ToolPaletteView.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		AAMAIN /* AstraBoard */ = {
+			isa = PBXGroup;
+			children = (
+				AAMODELGROUP /* Models */,
+				AASTOREGROUP /* Store */,
+				AASERVGROUP /* Services */,
+				AAVIEWSGROUP /* Views */,
+				AARESOURCEGROUP /* Resources */,
+				AAAPPFILE /* App.swift */,
+				AAINFOFILE /* Info.plist */,
+			);
+			path = AstraBoard;
+			sourceTree = "<group>";
+		};
+		AAMODELGROUP /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				AAMODELFILE /* BoardModels.swift */,
+				AAGEOMFILE /* Geometry+Utils.swift */,
+				AATEXTMETRICSFILE /* TextEntryMetrics.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		AARESOURCEGROUP /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				AAASSETSFILE /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		AAROOTGROUP = {
+			isa = PBXGroup;
+			children = (
+				AAMAIN /* AstraBoard */,
+				AAPRODUCT /* AstraBoard.app */,
+			);
+			sourceTree = "<group>";
+		};
+		AASERVGROUP /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				AASERVFILE /* Services.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		AASTOREGROUP /* Store */ = {
+			isa = PBXGroup;
+			children = (
+				AASTOREFILE /* BoardStore.swift */,
+			);
+			path = Store;
+			sourceTree = "<group>";
+		};
+		AAVIEWSGROUP /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				AABOARDGROUP /* Board */,
+				AACOMPONENTSGROUP /* Components */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AATARGET /* AstraBoard */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AABUILDCONFIGLIST /* Build configuration list for PBXNativeTarget "AstraBoard" */;
+			buildPhases = (
+				AASOURCES /* Sources */,
+				AAFRAMEWORKS /* Frameworks */,
+				AARESOURCES /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AstraBoard;
+			productName = AstraBoard;
+			productReference = AAPRODUCT /* AstraBoard.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AAPROJECT /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					AATARGET = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = AAPROJECTBUILDCONFIGLIST /* Build configuration list for PBXProject "AstraBoard" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = AAROOTGROUP;
+			productRefGroup = AAROOTGROUP;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AATARGET /* AstraBoard */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AARESOURCES /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AAASSETSBUILD /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AASOURCES /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AAHUDPANBUILD /* HUDAndPanels.swift in Sources */,
+				AATOOLBUILD /* ToolPaletteView.swift in Sources */,
+				AAENTRYVBUILD /* EntryRenderers.swift in Sources */,
+				AABOARDVBUILD /* BoardViews.swift in Sources */,
+				AASERVBUILD /* Services.swift in Sources */,
+				AASTOREBUILD /* BoardStore.swift in Sources */,
+				AATEXTMETRICSBUILD /* TextEntryMetrics.swift in Sources */,
+				AAGEOMBUILD /* Geometry+Utils.swift in Sources */,
+				AAMODELBUILD /* BoardModels.swift in Sources */,
+				AAAPPBUILD /* App.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AADebug /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AARelease /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		AATargetDebug /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AstraBoard/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.AstraBoard;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+			};
+			name = Debug;
+		};
+		AATargetRelease /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				CODE_SIGN_ENTITLEMENTS = "";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AstraBoard/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.AstraBoard;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AABUILDCONFIGLIST /* Build configuration list for PBXNativeTarget "AstraBoard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AATargetDebug /* Debug */,
+				AATargetRelease /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		AAPROJECTBUILDCONFIGLIST /* Build configuration list for PBXProject "AstraBoard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AADebug /* Debug */,
+				AARelease /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AAPROJECT /* Project object */;
+}
