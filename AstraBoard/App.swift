@@ -551,3 +551,28 @@ struct PastingChatTextView: NSViewRepresentable {
         }
     }
 }
+
+enum LoginItemManager {
+    static func setEnabled(_ enabled: Bool) {
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                print("Launch at login error:", error)
+            }
+        } else {
+            // For macOS 12 and earlier you'd need the older helper-app approach.
+            // If you’re on Ventura/Sonoma+ you can ignore this.
+        }
+    }
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
