@@ -16,13 +16,38 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>astraboard</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSMainNibFile</key>
 	<string></string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Astra needs microphone access for voice input.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Astra uses the camera to capture images you ask about.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Astra needs speech recognition to transcribe your voice.</string>
+	<key>SUPABASE_PUBLISHABLE_KEY</key>
+	<string>sb_publishable_fN5P2ikJ30dNVUWQKgeeHQ_69mvCEma</string>
+	<key>SUPABASE_ASSETS_BUCKET</key>
+	<string>board-assets</string>
+	<key>SUPABASE_URL</key>
+	<string>https://hwmvcufxrupbgtzwqstu.supabase.co</string>
 </dict>
 </plist>

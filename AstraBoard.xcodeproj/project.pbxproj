@@ -3,12 +3,33 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 70;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		14441F9E3E0B4761B648FC6F /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B0B31377444B2CB4398288 /* AuthService.swift */; };
+		32E943EDF68241DE8F61A233 /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B41C163DEAB49B9887F3E95 /* SupabaseService.swift */; };
+		4935EFE22F3B4A1E8D609AD9 /* AuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B0B31377444B2CB4398288 /* AuthService.swift */; };
+		4ADAEDD74263432AAA7EC5B6 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 9DACBEA686B349228F0FDB43 /* Supabase */; };
+		5ED57DDAF928096761089542 /* BoardStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASTOREFILE /* BoardStore.swift */; };
+		7F3D217E1EB84CAB91FB394D /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 9DACBEA686B349228F0FDB43 /* Supabase */; };
+		86008C360A704E8BBAC11AD4 /* BoardSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C90E1D1BA24FB2B59DFDB2 /* BoardSyncService.swift */; };
+		8637CD9B2F23D95000BE8671 /* wordnet.sqlite in Resources */ = {isa = PBXBuildFile; fileRef = 8637CD9A2F23D95000BE8671 /* wordnet.sqlite */; };
+		8637CD9C2F23D95000BE8671 /* wordnet.sqlite in Resources */ = {isa = PBXBuildFile; fileRef = 8637CD9A2F23D95000BE8671 /* wordnet.sqlite */; };
+		8637CD9F2F23D99D00BE8671 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 8637CD9E2F23D99D00BE8671 /* libsqlite3.tbd */; };
+		8637CDA12F23D9A400BE8671 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 8637CDA02F23D9A400BE8671 /* libsqlite3.tbd */; };
+		8637CDA32F23D9CB00BE8671 /* DictionaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8637CDA22F23D9C900BE8671 /* DictionaryService.swift */; };
+		8637CDA42F23D9CB00BE8671 /* DictionaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8637CDA22F23D9C900BE8671 /* DictionaryService.swift */; };
+		86AAA8BC2F146B8500A961AE /* BoardModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAMODELFILE /* BoardModels.swift */; };
+		86AAA8BD2F146B9E00A961AE /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASERVFILE /* Services.swift */; };
+		86AAA8BE2F146B9E00A961AE /* TextEntryMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATEXTMETRICSFILE /* TextEntryMetrics.swift */; };
+		86AAA8C02F146B9E00A961AE /* Geometry+Utils.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAGEOMFILE /* Geometry+Utils.swift */; };
+		86AAA8C52F146F6700A961AE /* PersistenceService+ImportExport_macOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */; };
+		9C45F65B1838434EB74C64B6 /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B41C163DEAB49B9887F3E95 /* SupabaseService.swift */; };
+		AA5B1C2D3E4F5061728394A6 /* VoicePillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5B1C2D3E4F5061728394A5 /* VoicePillView.swift */; };
 		AAAPPBUILD /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAPPFILE /* App.swift */; };
 		AAASSETSBUILD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AAASSETSFILE /* Assets.xcassets */; };
+		AABOARDSPOPOVERBUILD /* BoardsPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABOARDSPOPOVERFILE /* BoardsPopoverView.swift */; };
 		AABOARDVBUILD /* BoardViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = AABOARDVFILE /* BoardViews.swift */; };
 		AAENTRYVBUILD /* EntryRenderers.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAENTRYVFILE /* EntryRenderers.swift */; };
 		AAGEOMBUILD /* Geometry+Utils.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAGEOMFILE /* Geometry+Utils.swift */; };
@@ -18,11 +39,27 @@
 		AASTOREBUILD /* BoardStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASTOREFILE /* BoardStore.swift */; };
 		AATEXTMETRICSBUILD /* TextEntryMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATEXTMETRICSFILE /* TextEntryMetrics.swift */; };
 		AATOOLBUILD /* ToolPaletteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATOOLFILE /* ToolPaletteView.swift */; };
+		B410F4D915164AA180BBA2BF /* BoardSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C90E1D1BA24FB2B59DFDB2 /* BoardSyncService.swift */; };
+		E5A1C0A62F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */; };
+		E5A1C0A72F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */; };
+		E5A1C0A82F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */; };
+		E5A1C0AA2F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		09B0B31377444B2CB4398288 /* AuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthService.swift; sourceTree = "<group>"; };
+		7B41C163DEAB49B9887F3E95 /* SupabaseService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseService.swift; sourceTree = "<group>"; };
+		8637CD9A2F23D95000BE8671 /* wordnet.sqlite */ = {isa = PBXFileReference; lastKnownFileType = file; path = wordnet.sqlite; sourceTree = "<group>"; };
+		8637CD9E2F23D99D00BE8671 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
+		8637CDA02F23D9A400BE8671 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.2.sdk/usr/lib/libsqlite3.tbd; sourceTree = DEVELOPER_DIR; };
+		8637CDA22F23D9C900BE8671 /* DictionaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryService.swift; sourceTree = "<group>"; };
+		8695479E2F2A92C00050775F /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
+		86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PersistenceService+ImportExport_macOS.swift"; sourceTree = "<group>"; };
+		86F9132C2F14621A00F98D09 /* Astra IOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Astra IOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA5B1C2D3E4F5061728394A5 /* VoicePillView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePillView.swift; sourceTree = "<group>"; };
 		AAAPPFILE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		AAASSETSFILE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AABOARDSPOPOVERFILE /* BoardsPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardsPopoverView.swift; sourceTree = "<group>"; };
 		AABOARDVFILE /* BoardViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardViews.swift; sourceTree = "<group>"; };
 		AAENTRYVFILE /* EntryRenderers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryRenderers.swift; sourceTree = "<group>"; };
 		AAGEOMFILE /* Geometry+Utils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Geometry+Utils.swift"; sourceTree = "<group>"; };
@@ -34,19 +71,46 @@
 		AASTOREFILE /* BoardStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardStore.swift; sourceTree = "<group>"; };
 		AATEXTMETRICSFILE /* TextEntryMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextEntryMetrics.swift; sourceTree = "<group>"; };
 		AATOOLFILE /* ToolPaletteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolPaletteView.swift; sourceTree = "<group>"; };
+		B7C90E1D1BA24FB2B59DFDB2 /* BoardSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoardSyncService.swift; sourceTree = "<group>"; };
+		E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputManager.swift; sourceTree = "<group>"; };
+		E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceWakeListener.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		86F9132D2F14621A00F98D09 /* Astra IOS */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = "Astra IOS"; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
 /* Begin PBXFrameworksBuildPhase section */
+		86F913292F14621A00F98D09 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8637CDA12F23D9A400BE8671 /* libsqlite3.tbd in Frameworks */,
+				4ADAEDD74263432AAA7EC5B6 /* Supabase in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AAFRAMEWORKS /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8637CD9F2F23D99D00BE8671 /* libsqlite3.tbd in Frameworks */,
+				7F3D217E1EB84CAB91FB394D /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		8637CD9D2F23D99D00BE8671 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				8637CDA02F23D9A400BE8671 /* libsqlite3.tbd */,
+				8637CD9E2F23D99D00BE8671 /* libsqlite3.tbd */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		AABOARDGROUP /* Board */ = {
 			isa = PBXGroup;
 			children = (
@@ -61,6 +125,7 @@
 			children = (
 				AAHUDPANFILE /* HUDAndPanels.swift */,
 				AATOOLFILE /* ToolPaletteView.swift */,
+				AABOARDSPOPOVERFILE /* BoardsPopoverView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -68,6 +133,7 @@
 		AAMAIN /* AstraBoard */ = {
 			isa = PBXGroup;
 			children = (
+				8637CDA22F23D9C900BE8671 /* DictionaryService.swift */,
 				AAMODELGROUP /* Models */,
 				AASTOREGROUP /* Store */,
 				AASERVGROUP /* Services */,
@@ -75,6 +141,7 @@
 				AARESOURCEGROUP /* Resources */,
 				AAAPPFILE /* App.swift */,
 				AAINFOFILE /* Info.plist */,
+				8637CD9A2F23D95000BE8671 /* wordnet.sqlite */,
 			);
 			path = AstraBoard;
 			sourceTree = "<group>";
@@ -100,14 +167,24 @@
 		AAROOTGROUP = {
 			isa = PBXGroup;
 			children = (
+				8695479E2F2A92C00050775F /* .gitignore */,
 				AAMAIN /* AstraBoard */,
 				AAPRODUCT /* AstraBoard.app */,
+				86F9132C2F14621A00F98D09 /* Astra IOS.app */,
+				86F9132D2F14621A00F98D09 /* Astra IOS */,
+				8637CD9D2F23D99D00BE8671 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
 		AASERVGROUP /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */,
+				B7C90E1D1BA24FB2B59DFDB2 /* BoardSyncService.swift */,
+				09B0B31377444B2CB4398288 /* AuthService.swift */,
+				7B41C163DEAB49B9887F3E95 /* SupabaseService.swift */,
+				E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */,
+				E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */,
 				AASERVFILE /* Services.swift */,
 			);
 			path = Services;
@@ -126,6 +203,7 @@
 			children = (
 				AABOARDGROUP /* Board */,
 				AACOMPONENTSGROUP /* Components */,
+				AA5B1C2D3E4F5061728394A5 /* VoicePillView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -133,6 +211,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		86F9132B2F14621A00F98D09 /* Astra IOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 86F913342F14621B00F98D09 /* Build configuration list for PBXNativeTarget "Astra IOS" */;
+			buildPhases = (
+				86F913282F14621A00F98D09 /* Sources */,
+				86F913292F14621A00F98D09 /* Frameworks */,
+				86F9132A2F14621A00F98D09 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				86F9132D2F14621A00F98D09 /* Astra IOS */,
+			);
+			name = "Astra IOS";
+			packageProductDependencies = (
+				9DACBEA686B349228F0FDB43 /* Supabase */,
+			);
+			productName = "Astra IOS";
+			productReference = 86F9132C2F14621A00F98D09 /* Astra IOS.app */;
+			productType = "com.apple.product-type.application";
+		};
 		AATARGET /* AstraBoard */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = AABUILDCONFIGLIST /* Build configuration list for PBXNativeTarget "AstraBoard" */;
@@ -146,6 +247,9 @@
 			dependencies = (
 			);
 			name = AstraBoard;
+			packageProductDependencies = (
+				9DACBEA686B349228F0FDB43 /* Supabase */,
+			);
 			productName = AstraBoard;
 			productReference = AAPRODUCT /* AstraBoard.app */;
 			productType = "com.apple.product-type.application";
@@ -156,9 +260,12 @@
 		AAPROJECT /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				LastSwiftUpdateCheck = 1500;
+				LastSwiftUpdateCheck = 2620;
 				LastUpgradeCheck = 1500;
 				TargetAttributes = {
+					86F9132B2F14621A00F98D09 = {
+						CreatedOnToolsVersion = 26.2;
+					};
 					AATARGET = {
 						CreatedOnToolsVersion = 15.0;
 					};
@@ -172,37 +279,77 @@
 				en,
 			);
 			mainGroup = AAROOTGROUP;
+			packageReferences = (
+				EE0B484C9F7347AC9A3F3F96 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			productRefGroup = AAROOTGROUP;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				AATARGET /* AstraBoard */,
+				86F9132B2F14621A00F98D09 /* Astra IOS */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		86F9132A2F14621A00F98D09 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8637CD9B2F23D95000BE8671 /* wordnet.sqlite in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AARESOURCES /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 				AAASSETSBUILD /* Assets.xcassets in Resources */,
+				8637CD9C2F23D95000BE8671 /* wordnet.sqlite in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		86F913282F14621A00F98D09 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				86008C360A704E8BBAC11AD4 /* BoardSyncService.swift in Sources */,
+				14441F9E3E0B4761B648FC6F /* AuthService.swift in Sources */,
+				9C45F65B1838434EB74C64B6 /* SupabaseService.swift in Sources */,
+				86AAA8BC2F146B8500A961AE /* BoardModels.swift in Sources */,
+				86AAA8BD2F146B9E00A961AE /* Services.swift in Sources */,
+				E5A1C0A62F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */,
+				E5A1C0A82F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */,
+				5ED57DDAF928096761089542 /* BoardStore.swift in Sources */,
+				8637CDA42F23D9CB00BE8671 /* DictionaryService.swift in Sources */,
+				86AAA8BE2F146B9E00A961AE /* TextEntryMetrics.swift in Sources */,
+				86AAA8C02F146B9E00A961AE /* Geometry+Utils.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		AASOURCES /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B410F4D915164AA180BBA2BF /* BoardSyncService.swift in Sources */,
+				4935EFE22F3B4A1E8D609AD9 /* AuthService.swift in Sources */,
+				32E943EDF68241DE8F61A233 /* SupabaseService.swift in Sources */,
 				AAHUDPANBUILD /* HUDAndPanels.swift in Sources */,
 				AATOOLBUILD /* ToolPaletteView.swift in Sources */,
+				AABOARDSPOPOVERBUILD /* BoardsPopoverView.swift in Sources */,
 				AAENTRYVBUILD /* EntryRenderers.swift in Sources */,
 				AABOARDVBUILD /* BoardViews.swift in Sources */,
+				AA5B1C2D3E4F5061728394A6 /* VoicePillView.swift in Sources */,
 				AASERVBUILD /* Services.swift in Sources */,
+				E5A1C0A72F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */,
+				E5A1C0AA2F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */,
+				8637CDA32F23D9CB00BE8671 /* DictionaryService.swift in Sources */,
 				AASTOREBUILD /* BoardStore.swift in Sources */,
+				86AAA8C52F146F6700A961AE /* PersistenceService+ImportExport_macOS.swift in Sources */,
 				AATEXTMETRICSBUILD /* TextEntryMetrics.swift in Sources */,
 				AAGEOMBUILD /* Geometry+Utils.swift in Sources */,
 				AAMODELBUILD /* BoardModels.swift in Sources */,
@@ -213,6 +360,92 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		86F913352F14621B00F98D09 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = J8NDJQKZ7U;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Astra-IOS-Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Khalid.AstraBoard.IOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		86F913362F14621B00F98D09 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = J8NDJQKZ7U;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Astra-IOS-Info.plist";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Khalid.AstraBoard.IOS;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
 		AADebug /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -335,7 +568,7 @@
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = J8NDJQKZ7U;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AstraBoard/Info.plist;
@@ -344,9 +577,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.AstraBoard;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Khalid.AstraBoard;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 			};
 			name = Debug;
@@ -358,7 +593,7 @@
 				CODE_SIGN_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_ASSET_PATHS = "";
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = J8NDJQKZ7U;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AstraBoard/Info.plist;
@@ -367,9 +602,11 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.AstraBoard;
+				PRODUCT_BUNDLE_IDENTIFIER = com.Khalid.AstraBoard;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 			};
 			name = Release;
@@ -377,6 +614,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		86F913342F14621B00F98D09 /* Build configuration list for PBXNativeTarget "Astra IOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				86F913352F14621B00F98D09 /* Debug */,
+				86F913362F14621B00F98D09 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		AABUILDCONFIGLIST /* Build configuration list for PBXNativeTarget "AstraBoard" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -396,6 +642,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		EE0B484C9F7347AC9A3F3F96 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase-community/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.40.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		9DACBEA686B349228F0FDB43 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = EE0B484C9F7347AC9A3F3F96 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AAPROJECT /* Project object */;
 }

@@ -2,8 +2,7 @@ import SwiftUI
 import AppKit
 import Foundation
 import UniformTypeIdentifiers
-
-private let panelMinSize = CGSize(width: 220, height: 180)
+import Supabase
 
 final class ChatInputFocusBridge {
     static let shared = ChatInputFocusBridge()
@@ -104,18 +103,24 @@ private struct FindBarView: View {
 
 struct HUDView: View {
     @EnvironmentObject var store: BoardStore
+    @EnvironmentObject var appModel: AstraAppModel
     @Environment(\.colorScheme) private var colorScheme
     @Binding var chatInput: String
-    var onSend: () -> Void
+    var onSend: (Bool) -> Void
     
     @State private var dragOffset: CGSize = .zero
     @State private var inputHeight: CGFloat = 56
     @State private var isMultiLineInput = false
     @State private var textFieldKey: UUID = UUID() // Add this to force refresh
     @State private var suppressToggleAfterDrag = false
+    @StateObject private var voiceInput = VoiceInputManager()
+    @State private var resumeWakeListeningAfterVoice = false
+    @State private var voiceSilenceWorkItem: DispatchWorkItem?
+    @State private var lastVoiceTranscript: String = ""
 
     private let baseInputHeight: CGFloat = 56
     private let inputVerticalPadding: CGFloat = 20
+    private let voiceSilenceTimeout: TimeInterval = 2.0
 
     private var bubbleColor: Color {
         Color(NSColor.controlBackgroundColor).opacity(colorScheme == .dark ? 0.65 : 0.42)
@@ -176,6 +181,28 @@ struct HUDView: View {
                     textFieldKey = UUID() // Force text field to recreate
                 }
             }
+            .onChange(of: voiceInput.transcript) { newValue in
+                guard voiceInput.isRecording else { return }
+                if newValue != lastVoiceTranscript {
+                    lastVoiceTranscript = newValue
+                    resetVoiceSilenceTimer()
+                }
+                chatInput = newValue
+            }
+            .onChange(of: store.isVoiceConversationActive) { isActive in
+                if !isActive {
+                    resumeWakeListeningIfNeeded()
+                }
+            }
+            .onChange(of: store.voiceConversationResumeToken) { _ in
+                resumeVoiceConversationInputIfNeeded()
+            }
+            .onAppear {
+                handlePendingWakeWord()
+            }
+            .onChange(of: appModel.pendingWakeWord) { _ in
+                handlePendingWakeWord()
+            }
             .onChange(of: inputHeight) { newHeight in
                 let isEmpty = chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if !isEmpty {
@@ -235,7 +262,7 @@ struct HUDView: View {
             }
             PasteAwareTextField(text: $chatInput,
                                 placeholder: "Hm?",
-                                onCommit: onSend,
+                                onCommit: { onSend(false) },
                                 onPasteAttachment: { store.attachChatAttachmentsFromPasteboard() },
                                 font: hudInputFont,
                                 textColor: hudInputColor,
@@ -258,7 +285,8 @@ struct HUDView: View {
                                 drawsBackground: false,
                                 focusRingType: .none,
                                 bezelStyle: .squareBezel)
-                .padding(.horizontal, 14)
+                .padding(.leading, 14)
+                .padding(.trailing, 44)
                 .padding(.vertical, 10)
         }
         .overlay(alignment: .topLeading) {
@@ -279,6 +307,10 @@ struct HUDView: View {
                 .padding(.top, 2)
                 .help("Pin to board")
             }
+        }
+        .overlay(alignment: .trailing) {
+            voiceButton
+                .padding(.trailing, 10)
         }
         .frame(height: inputHeight)
     }
@@ -408,11 +440,132 @@ struct HUDView: View {
         !chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var voiceButton: some View {
+        let isEndingConversation = store.isVoiceConversationActive && !voiceInput.isRecording
+        return Button(action: toggleVoiceInput) {
+            let symbol = isEndingConversation ? "mic.slash" : (voiceInput.isRecording ? "mic.fill" : "mic")
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .background(
+                    Circle()
+                        .fill(bubbleColor)
+                        .overlay(
+                            Circle().stroke(voiceInput.isRecording ? Color.red.opacity(0.7) : accentBorder,
+                                            lineWidth: 1)
+                        )
+                )
+        }
+        .buttonStyle(.plain)
+        .foregroundColor((voiceInput.isRecording || isEndingConversation) ? Color.red : iconColor)
+        .help(isEndingConversation ? "End voice conversation"
+              : (voiceInput.isRecording ? "Stop voice input" : "Start voice input"))
+    }
+
     private func pinChatInputText() {
         let text = chatInput
         if store.pinChatInputText(text) {
             chatInput = ""
         }
+    }
+
+    private func toggleVoiceInput() {
+        if voiceInput.isRecording {
+            stopVoiceInputAndSend()
+        } else if store.isVoiceConversationActive {
+            endVoiceConversation()
+        } else {
+            startVoiceInput(triggeredByWakeWord: false)
+        }
+    }
+
+    private func startVoiceInput(triggeredByWakeWord: Bool) {
+        appModel.pauseWakeListening()
+        resumeWakeListeningAfterVoice = store.doc.chatSettings.alwaysListening
+        if triggeredByWakeWord {
+            if !store.doc.ui.hud.isVisible {
+                store.toggleHUD()
+            }
+            if !store.doc.ui.panels.chat.isOpen {
+                store.togglePanel(.chat)
+            }
+        }
+        Task {
+            let started = await voiceInput.startTranscribing(initialText: chatInput)
+            if started {
+                store.beginVoiceConversation()
+                lastVoiceTranscript = voiceInput.transcript
+                resetVoiceSilenceTimer()
+                ChatInputFocusBridge.shared.requestFocus(moveCaretToEnd: true)
+            } else {
+                store.endVoiceConversation()
+                resumeWakeListeningIfNeeded()
+            }
+        }
+    }
+
+    private func stopVoiceInputAndSend() {
+        guard voiceInput.isRecording else { return }
+        voiceSilenceWorkItem?.cancel()
+        voiceSilenceWorkItem = nil
+        voiceInput.stopTranscribing { finalText in
+            let trimmed = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+            chatInput = trimmed
+            if !trimmed.isEmpty {
+                onSend(true)
+            } else {
+                store.endVoiceConversation()
+                resumeWakeListeningIfNeeded()
+            }
+            lastVoiceTranscript = ""
+        }
+    }
+
+    private func endVoiceConversation() {
+        voiceSilenceWorkItem?.cancel()
+        voiceSilenceWorkItem = nil
+        lastVoiceTranscript = ""
+        if voiceInput.isRecording {
+            voiceInput.cancelTranscribing()
+        }
+        store.stopSpeechPlayback()
+        resumeWakeListeningIfNeeded()
+    }
+
+    private func resetVoiceSilenceTimer() {
+        guard voiceInput.isRecording else { return }
+        voiceSilenceWorkItem?.cancel()
+        let work = DispatchWorkItem {
+            guard voiceInput.isRecording else { return }
+            stopVoiceInputAndSend()
+        }
+        voiceSilenceWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + voiceSilenceTimeout, execute: work)
+    }
+
+    private func handlePendingWakeWord() {
+        guard appModel.pendingWakeWord else { return }
+        appModel.markWakeWordHandled()
+        guard store.doc.chatSettings.alwaysListening else { return }
+        if voiceInput.isRecording || store.isVoiceConversationActive {
+            return
+        }
+        startVoiceInput(triggeredByWakeWord: true)
+    }
+
+    private func resumeWakeListeningIfNeeded() {
+        guard resumeWakeListeningAfterVoice else { return }
+        resumeWakeListeningAfterVoice = false
+        guard store.doc.chatSettings.alwaysListening else { return }
+        appModel.resumeWakeListeningIfNeeded()
+    }
+
+    private func resumeVoiceConversationInputIfNeeded() {
+        guard store.isVoiceConversationActive else { return }
+        guard !voiceInput.isRecording else { return }
+        guard !store.isSpeaking else { return }
+        guard store.pendingChatReplies == 0 else { return }
+        startVoiceInput(triggeredByWakeWord: false)
     }
 }
 
@@ -507,7 +660,7 @@ private struct HUDScrollCapture: NSViewRepresentable {
 struct FloatingPanelHostView: View {
     @EnvironmentObject var store: BoardStore
     @Binding var chatInput: String
-    var onSend: () -> Void
+    var onSend: (Bool) -> Void
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -619,22 +772,23 @@ struct FloatingPanelView<Content: View>: View {
         Color(NSColor.windowBackgroundColor).opacity(colorScheme == .dark ? 0.92 : 0.82)
     }
     private var panelBorder: Color {
-        Color(NSColor.separatorColor)
+        Color.clear
     }
     private var panelShadow: Color {
         Color.black.opacity(colorScheme == .dark ? 0.5 : 0.15)
     }
 
     var body: some View {
+        let minSize = BoardStore.panelMinSize(for: panelKind)
         let frame = CGRect(x: box.x.cg,
                            y: box.y.cg,
-                           width: max(panelMinSize.width, box.w.cg),
-                           height: max(panelMinSize.height, box.h.cg))
+                           width: max(minSize.width, box.w.cg),
+                           height: max(minSize.height, box.h.cg))
 
-        return panelBody(frame: frame)
+        return panelBody(frame: frame, minSize: minSize)
     }
 
-    private func panelBody(frame: CGRect) -> some View {
+    private func panelBody(frame: CGRect, minSize: CGSize) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Button(action: onClose) {
@@ -676,7 +830,7 @@ struct FloatingPanelView<Content: View>: View {
         .overlay(alignment: .topLeading) {
             PanelResizeHandles(
                 frame: frame,
-                minSize: panelMinSize,
+                minSize: minSize,
                 panelKind: panelKind,
                 onUpdate: onUpdate
             )
@@ -706,7 +860,7 @@ private struct ChatBottomMaxYKey: PreferenceKey {
 struct ChatPanelView: View {
     @EnvironmentObject var store: BoardStore
     @Binding var chatInput: String
-    var onSend: () -> Void
+    var onSend: (Bool) -> Void
 
     @State private var isPinnedToBottom: Bool = true
     @State private var viewportHeight: CGFloat = 0
@@ -823,6 +977,13 @@ struct ChatPanelView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
+                    if store.isSpeaking {
+                        Button("Stop Voice") {
+                            store.stopSpeechPlayback()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
                     Button("New Chat") {
                         store.startNewChat()
                         chatInput = ""
@@ -860,12 +1021,19 @@ struct ChatPanelView: View {
                                     && store.pendingChatReplies == 0
                                 let canEdit = msg.role == .user
                                     && store.pendingChatReplies == 0
+                                let isActiveReply = msg.role == .model
+                                    && index == store.doc.chat.messages.count - 1
+                                    && store.pendingChatReplies > 0
+                                let activityText = (isActiveReply && msg.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    ? store.chatActivityStatus
+                                    : nil
 
                                 ChatMessageRow(
                                     message: msg,
                                     showsRetry: canRetry,
                                     onRetry: { store.retryChatReply(messageId: msg.id) },
-                                    showsEdit: canEdit
+                                    showsEdit: canEdit,
+                                    activityText: activityText
                                 )
                                 .id(msg.id)
 
@@ -1098,7 +1266,31 @@ struct ChatArchivePanelView: View {
         .onExitCommand { pendingFindCommand = .close }
     }
 }
+private struct ChatActivityStatusView: View {
+    let text: String
+    @State private var pulse = false
 
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(NSColor.secondaryLabelColor).opacity(0.7))
+                .frame(width: 6, height: 6)
+                .scaleEffect(pulse ? 1.0 : 0.6)
+                .opacity(pulse ? 1.0 : 0.4)
+            Text(text)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(Color(NSColor.secondaryLabelColor))
+                .opacity(pulse ? 1.0 : 0.7)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .onDisappear { pulse = false }
+        .accessibilityLabel(Text(text))
+    }
+}
 
 private struct ChatMessageRow: View {
     @EnvironmentObject var store: BoardStore
@@ -1106,15 +1298,16 @@ private struct ChatMessageRow: View {
     var showsRetry: Bool = false
     var onRetry: () -> Void = {}
     var showsEdit: Bool = false
+    var activityText: String? = nil
 
     @State private var isEditing = false
     @State private var draftText = ""
     @State private var isWebResultsExpanded = false
 
     private enum ChatTypography {
-        static let senderFont = Font.system(size: 18, weight: .semibold)
-        static let messageFont = Font.system(size: 17, weight: .regular)
-        static let messageLineSpacing: CGFloat = 6
+        static let senderFont = ChatStyle.senderFont
+        static let messageFont: Font = .system(size: ChatStyle.basePointSize, weight: .regular)
+        static let messageLineSpacing: CGFloat = 0
         static let editorMinHeight: CGFloat = 88
     }
 
@@ -1123,6 +1316,68 @@ private struct ChatMessageRow: View {
             || !message.images.isEmpty
             || !message.files.isEmpty
     }
+
+    private var messageDate: Date? {
+        message.ts > 0 ? Date(timeIntervalSince1970: message.ts) : nil
+    }
+
+    private func createMarkdownAttributedString() -> NSAttributedString {
+    guard let md = markdownText else {
+        return NSAttributedString(string: message.text)
+    }
+
+    let s = String(md.characters)
+    let out = NSMutableAttributedString(md)
+
+    let baseSize: CGFloat = 17
+    let baseFont = NSFont.systemFont(ofSize: baseSize, weight: .regular)
+
+    func nsRange(for runRange: Range<AttributedString.Index>) -> NSRange {
+        let lower = md.characters.distance(from: md.characters.startIndex, to: runRange.lowerBound)
+        let upper = md.characters.distance(from: md.characters.startIndex, to: runRange.upperBound)
+        let start = s.index(s.startIndex, offsetBy: lower)
+        let end = s.index(s.startIndex, offsetBy: upper)
+        return NSRange(start..<end, in: s)
+    }
+
+    for run in md.runs {
+        var font = baseFont
+
+        // Headings
+        if let intent = run.attributes.presentationIntent {
+            for c in intent.components {
+                if case .header(let level) = c.kind {
+                    let (size, weight): (CGFloat, NSFont.Weight) = {
+                        switch level {
+                        case 1: return (28, .bold)
+                        case 2: return (24, .bold)
+                        case 3: return (20, .semibold)
+                        default: return (18, .semibold)
+                        }
+                    }()
+                    font = ChatStyle.headingFont(level: level)
+                }
+            }
+        }
+
+        // Bold / italic / code
+        if let inline = run.attributes.inlinePresentationIntent {
+            if inline.contains(.stronglyEmphasized) {
+                font = NSFont.systemFont(ofSize: font.pointSize, weight: .bold)
+            }
+            if inline.contains(.emphasized) {
+                font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+            }
+            if inline.contains(.code) {
+                font = NSFont.monospacedSystemFont(ofSize: max(16, font.pointSize - 1), weight: .regular)
+            }
+        }
+
+        out.addAttribute(.font, value: font, range: nsRange(for: run.range))
+    }
+
+    return out
+}
 
     private var markdownText: AttributedString? {
         let source = markdownSource
@@ -1296,7 +1551,7 @@ private struct ChatMessageRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(message.role == .user ? "You" : "Astra")
-                        .font(ChatTypography.senderFont)
+                        .font(ChatStyle.senderFont)
                         .foregroundColor(Color(NSColor.secondaryLabelColor))
                     if message.role == .model && showsRetry {
                         Button(action: onRetry) {
@@ -1320,6 +1575,14 @@ private struct ChatMessageRow: View {
                         .foregroundColor(Color(NSColor.secondaryLabelColor))
                         .help("Edit message")
                     }
+                }
+                if let messageDate {
+                    HStack(spacing: 6) {
+                        Text(messageDate, style: .date)
+                        Text(messageDate, style: .time)
+                    }
+                    .font(ChatStyle.timestampFont)
+                    .foregroundColor(Color(NSColor.secondaryLabelColor))
                 }
                 if let web = message.webSearch, !web.items.isEmpty {
                     DisclosureGroup(isExpanded: $isWebResultsExpanded) {
@@ -1401,21 +1664,15 @@ private struct ChatMessageRow: View {
                     // NOTE: SwiftUI's `Text(AttributedString)` + `.textSelection(.enabled)`
                     // renders links with blue styling but doesn't reliably make them clickable
                     // on macOS. Use an NSTextView-backed renderer so links open in the browser.
-                    if let markdownText {
-                        ChatRichTextView(
-                            attributedText: NSAttributedString(markdownText),
-                            baseFont: NSFont.systemFont(ofSize: 17, weight: .regular),
-                            textColor: NSColor.labelColor,
-                            lineSpacing: ChatTypography.messageLineSpacing
-                        )
-                    } else {
-                        ChatRichTextView(
-                            attributedText: NSAttributedString(string: message.text),
-                            baseFont: NSFont.systemFont(ofSize: 17, weight: .regular),
-                            textColor: NSColor.labelColor,
-                            lineSpacing: ChatTypography.messageLineSpacing
-                        )
-                    }
+                    ChatRichTextView(
+                        attributedText: createMarkdownAttributedString(),
+                        baseFont: ChatStyle.baseFont,
+                        textColor: ChatStyle.baseColor,
+                        lineSpacing: 0
+                    )
+                } else if let activityText, !activityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ChatActivityStatusView(text: activityText)
+                        .padding(.vertical, 2)
                 }
                 if !message.images.isEmpty {
                     let maxSide: CGFloat = message.images.count > 1 ? 200 : 260
@@ -1507,8 +1764,97 @@ private struct ChatMessageRow: View {
     }
 }
 
-/// NSTextView-backed message renderer that keeps text selectable *and* makes
-/// markdown links clickable on macOS.
+struct MarkdownText: View {
+    let content: String
+
+    var body: some View {
+        if let attributed = renderMarkdown() {
+            Text(attributed)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            // Fallback if parsing fails (very rare)
+            Text(content)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func renderMarkdown() -> AttributedString? {
+        // 1. NEWLINE HACK
+        // Markdown swallows single newlines. We replace them with "  \n" (Hard Break).
+        // We protect double newlines (\n\n) which act as paragraph breaks.
+        let textWithHardBreaks = content
+            .replacingOccurrences(of: "\r\n", with: "\n") // normalize CRLF
+            .replacingOccurrences(of: "\n\n", with: "§§PARAGRAPH§§") // protect paragraphs
+            .replacingOccurrences(of: "\n", with: "  \n") // force hard break on single lines
+            .replacingOccurrences(of: "§§PARAGRAPH§§", with: "\n\n") // restore paragraphs
+
+        // 2. PARSE MARKDOWN
+        // We assume generic Markdown syntax.
+        guard var attributed = try? AttributedString(markdown: textWithHardBreaks) else {
+            return nil
+        }
+
+        // 3. APPLY STYLING
+        // Block-level styling (headers) comes from presentationIntent.
+        // Inline styling (code/bold/italic intent) comes from inlinePresentationIntent.
+
+        for run in attributed.runs {
+
+            if let intent = run.attributes.presentationIntent {
+                for component in intent.components {
+                    switch component.kind {
+                    case .header(let level):
+                        switch level {
+                        case 1: attributed[run.range].font = .system(.title).bold()
+                        case 2: attributed[run.range].font = .system(.title2).bold()
+                        case 3: attributed[run.range].font = .system(.title3).bold()
+                        default: attributed[run.range].font = .system(.headline).bold()
+                        }
+                    default:
+                        break
+                    }
+                }
+            }
+
+            if let inline = run.attributes.inlinePresentationIntent,
+               inline.contains(.code) {
+                attributed[run.range].font = .system(.body, design: .monospaced)
+                attributed[run.range].foregroundColor = .secondary
+            }
+        }
+        return attributed
+    }
+}
+
+private enum ChatStyle {
+    // ChatGPT-ish defaults
+    static let basePointSize: CGFloat = 15.5
+    static let baseFont: NSFont = .systemFont(ofSize: basePointSize, weight: .regular)
+    static let baseColor: NSColor = .labelColor
+
+    // Readability
+    static let lineHeightMultiple: CGFloat = 1.22
+    static let paragraphSpacing: CGFloat = 8
+    static let paragraphSpacingBefore: CGFloat = 2
+
+    // Container feel
+    static let textInset = NSSize(width: 0, height: 2)
+    static let lineFragmentPadding: CGFloat = 2
+
+    // Headings (relative, not huge)
+    static func headingFont(level: Int) -> NSFont {
+        switch level {
+        case 1: return .systemFont(ofSize: 22, weight: .bold)
+        case 2: return .systemFont(ofSize: 19, weight: .bold)
+        case 3: return .systemFont(ofSize: 17, weight: .semibold)
+        default: return .systemFont(ofSize: 16.5, weight: .semibold)
+        }
+    }
+
+    static let senderFont: Font = .system(size: 15, weight: .semibold)
+    static let timestampFont: Font = .system(size: 11, weight: .regular)
+}
+
 private struct ChatRichTextView: NSViewRepresentable {
     let attributedText: NSAttributedString
     let baseFont: NSFont
@@ -1537,8 +1883,8 @@ private struct ChatRichTextView: NSViewRepresentable {
         textView.usesFontPanel = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
-        textView.textContainerInset = NSSize(width: 0, height: 0)
-        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainerInset = ChatStyle.textInset
+        textView.textContainer?.lineFragmentPadding = ChatStyle.lineFragmentPadding
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
@@ -1578,16 +1924,9 @@ private struct ChatRichTextView: NSViewRepresentable {
 
     private func applyText(to textView: NSTextView, in scrollView: PassThroughScrollView) {
         let display = makeDisplayAttributedString()
-
-        // Assign content.
         textView.textStorage?.setAttributedString(display)
 
-        // Base style (used for any runs that don't specify their own).
-        textView.font = baseFont
-        textView.textColor = textColor
-        textView.insertionPointColor = textColor
-
-        textView.textContainer?.widthTracksTextView = true
+        // Don't set textView.font or textView.textColor (it can flatten).
         syncWidthAndHeight(for: textView, in: scrollView)
     }
 
@@ -1595,19 +1934,30 @@ private struct ChatRichTextView: NSViewRepresentable {
         let mutable = NSMutableAttributedString(attributedString: attributedText)
         let full = NSRange(location: 0, length: mutable.length)
 
-        // Apply paragraph style (line spacing) uniformly.
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = lineSpacing
-        paragraph.lineBreakMode = .byWordWrapping
-        mutable.addAttribute(.paragraphStyle, value: paragraph, range: full)
+        mutable.enumerateAttribute(NSAttributedString.Key.paragraphStyle, in: full, options: []) { value, range, _ in
+            let p: NSMutableParagraphStyle
+            if let existing = value as? NSParagraphStyle,
+            let copy = existing.mutableCopy() as? NSMutableParagraphStyle {
+                p = copy
+            } else {
+                p = NSMutableParagraphStyle()
+            }
+
+            p.lineBreakMode = .byWordWrapping
+            p.lineHeightMultiple = ChatStyle.lineHeightMultiple
+            p.paragraphSpacing = ChatStyle.paragraphSpacing
+            p.paragraphSpacingBefore = ChatStyle.paragraphSpacingBefore
+
+            mutable.addAttribute(.paragraphStyle, value: p, range: range)
+        }
 
         // Ensure a base font/color exists for any runs that didn't get explicit attributes.
-        mutable.enumerateAttribute(.font, in: full, options: []) { value, range, _ in
+        mutable.enumerateAttribute(NSAttributedString.Key.font, in: full, options: []) { value, range, _ in
             if value == nil {
                 mutable.addAttribute(.font, value: baseFont, range: range)
             }
         }
-        mutable.enumerateAttribute(.foregroundColor, in: full, options: []) { value, range, _ in
+        mutable.enumerateAttribute(NSAttributedString.Key.foregroundColor, in: full, options: []) { value, range, _ in
             if value == nil {
                 mutable.addAttribute(.foregroundColor, value: textColor, range: range)
             }
@@ -1619,12 +1969,20 @@ private struct ChatRichTextView: NSViewRepresentable {
             detector.enumerateMatches(in: mutable.string, options: [], range: full) { match, _, _ in
                 guard let match, let url = match.url else { return }
                 // Don't clobber any existing link styling.
-                let existing = mutable.attribute(.link, at: match.range.location, effectiveRange: nil)
+                let existing = mutable.attribute(NSAttributedString.Key.link, at: match.range.location, effectiveRange: nil)
                 if existing == nil {
-                    mutable.addAttribute(.link, value: url, range: match.range)
+                    mutable.addAttribute(NSAttributedString.Key.link, value: url, range: match.range)
                 }
             }
         }
+
+        replaceHorizontalRules(in: mutable, baseFont: baseFont, textColor: textColor)
+        replaceMarkdownTables(in: mutable, baseFont: baseFont, textColor: textColor)
+        replaceTaskListCheckboxes(in: mutable, baseFont: baseFont, textColor: textColor)
+        styleUnorderedLists(in: mutable)
+        styleOrderedLists(in: mutable)
+        styleBlockquotes(in: mutable, baseFont: baseFont)
+        styleInlineCode(in: mutable, baseFont: baseFont)
 
         return mutable
     }
@@ -2101,10 +2459,39 @@ struct PasteAwareTextField: NSViewRepresentable {
 
 struct SettingsPanelView: View {
     @EnvironmentObject var store: BoardStore
+    @EnvironmentObject var authService: AuthService
+    @EnvironmentObject var syncService: BoardSyncService
     @State private var hudColorObserver: NSObjectProtocol?
+    @State private var email: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("Account")
+                .font(.headline)
+            HStack(spacing: 8) {
+                TextField("Email", text: $email)
+                    .textFieldStyle(.roundedBorder)
+                Button(action: sendMagicLink) {
+                    if authService.isSendingLink {
+                        ProgressView()
+                            .scaleEffect(0.7)
+                    } else {
+                        Text("Send sign-in link")
+                    }
+                }
+                .disabled(authService.isSendingLink || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            Text(authStatusText)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            if let message = authService.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Divider()
+
             Text("Name")
                 .font(.headline)
             TextField("Name", text: userNameBinding)
@@ -2115,6 +2502,40 @@ struct SettingsPanelView: View {
             SecureField("sk-...", text: apiKeyBinding)
                 .textFieldStyle(.roundedBorder)
 
+            Text("Voice")
+                .font(.headline)
+            Picker("Voice", selection: voiceBinding) {
+                ForEach(ChatSettings.availableVoices, id: \.self) { voice in
+                    Text(voice.capitalized).tag(voice)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: 220)
+            Text("Used for spoken replies after voice input.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Always listening (wake word: \"Astra\")", isOn: alwaysListeningBinding)
+                .toggleStyle(.switch)
+            Text("Starts voice input when Astra hears the wake word.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Divider()
+
+            Text("Sync (debug)")
+                .font(.headline)
+            Text("Pull: \(syncService.pullStatusText)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text("Push: \(syncService.pushStatusText)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Toggle("Sync across devices", isOn: syncEnabledBinding)
+                .toggleStyle(.switch)
+            Text("Disables automatic pulls/pushes/persistence uploads until re-enabled.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Divider()
 
             Text("HUD")
@@ -2124,6 +2545,29 @@ struct SettingsPanelView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .onDisappear {
             removeHUDColorObserver()
+        }
+        .onAppear {
+            if email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let existingEmail = authService.user?.email {
+                email = existingEmail
+            }
+        }
+    }
+
+    private var authStatusText: String {
+        if let email = authService.user?.email, !email.isEmpty {
+            return "Signed in as \(email)"
+        }
+        return "Signed out"
+    }
+
+    private func sendMagicLink() {
+        Task {
+            do {
+                try await authService.sendMagicLink(email: email)
+            } catch {
+                // AuthService already captures statusMessage.
+            }
         }
     }
 
@@ -2149,6 +2593,14 @@ struct SettingsPanelView: View {
         store.doc.ui.hudBarColor.color.opacity(store.doc.ui.hudBarOpacity)
     }
 
+    private var syncEnabledBinding: Binding<Bool> {
+        Binding(get: {
+            store.isDeviceSyncEnabled
+        }, set: { newValue in
+            store.setDeviceSyncEnabled(newValue)
+        })
+    }
+
     private var apiKeyBinding: Binding<String> {
         Binding(get: {
             store.doc.chatSettings.apiKey
@@ -2162,6 +2614,22 @@ struct SettingsPanelView: View {
             store.doc.chatSettings.userName
         }, set: { newValue in
             store.updateChatSettings { $0.userName = newValue }
+        })
+    }
+
+    private var voiceBinding: Binding<String> {
+        Binding(get: {
+            store.doc.chatSettings.voice
+        }, set: { newValue in
+            store.updateChatSettings { $0.voice = newValue }
+        })
+    }
+
+    private var alwaysListeningBinding: Binding<Bool> {
+        Binding(get: {
+            store.doc.chatSettings.alwaysListening
+        }, set: { newValue in
+            store.updateChatSettings { $0.alwaysListening = newValue }
         })
     }
 
@@ -2392,6 +2860,8 @@ struct MemoriesPanelView: View {
     @State private var findMatches: [Int] = []
     @State private var findIndex: Int = 0
     @State private var pendingFindCommand: FindCommand?
+    @State private var selectedCategory: MemoryCategory = .longTerm
+    @State private var hasInitializedCategory: Bool = false
 
     private enum FindCommand: Equatable {
         case open, next, prev, close
@@ -2458,6 +2928,7 @@ struct MemoriesPanelView: View {
 
     var body: some View {
         let memories = store.doc.memories
+        let filteredMemories = memories.filter { $0.category == selectedCategory }
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let matchSummary: String = {
@@ -2471,6 +2942,13 @@ struct MemoriesPanelView: View {
                 .allowsHitTesting(false)
 
             VStack(alignment: .leading, spacing: 10) {
+                Picker("Memory Category", selection: $selectedCategory) {
+                    ForEach(MemoryCategory.allCases) { category in
+                        Text(category.label).tag(category)
+                    }
+                }
+                .pickerStyle(.segmented)
+
                 ScrollViewReader { proxy in
                     VStack(alignment: .leading, spacing: 10) {
                         FindBarView(
@@ -2482,7 +2960,7 @@ struct MemoriesPanelView: View {
                             onClose: { pendingFindCommand = .close }
                         )
 
-                        if memories.isEmpty {
+                        if filteredMemories.isEmpty {
                             Spacer()
                             Text("No Memories")
                                 .font(.headline)
@@ -2494,7 +2972,7 @@ struct MemoriesPanelView: View {
                         } else {
                             ScrollView {
                                 LazyVStack(spacing: 0) {
-                                    ForEach(Array(memories.enumerated()), id: \.element.id) { idx, mem in
+                                    ForEach(Array(filteredMemories.enumerated()), id: \.element.id) { idx, mem in
                                         HStack(alignment: .top, spacing: 10) {
                                             VStack(alignment: .leading, spacing: 8) {
                                                 Text(mem.text)
@@ -2513,7 +2991,6 @@ struct MemoriesPanelView: View {
                                                 }
                                             }
                                             .padding(.vertical, 10)
-
                                             Button {
                                                 store.deleteMemory(id: mem.id)
                                             } label: {
@@ -2525,25 +3002,37 @@ struct MemoriesPanelView: View {
                                             .padding(.top, 8)
                                         }
                                         .padding(.horizontal, 12)
-                                        .id(idx)
+                                        .id(mem.id)
 
-                                        if idx != memories.count - 1 {
+                                        if idx != filteredMemories.count - 1 {
                                             Divider()
                                         }
                                     }
                                 }
                             }
-                            .onChange(of: memories.count) { _ in
-                                rebuildFindMatches(memories)
+                            .onChange(of: filteredMemories.count) { _ in
+                                rebuildFindMatches(filteredMemories)
                             }
                         }
                     }
                     // ✅ Find mechanics now attach to a REAL view (the VStack)
-                    .onAppear { rebuildFindMatches(memories) }
-                    .onChange(of: findQuery) { _ in rebuildFindMatches(memories) }
+                    .onAppear {
+                        if !hasInitializedCategory {
+                            if !memories.contains(where: { $0.category == selectedCategory }),
+                               let firstCategory = MemoryCategory.allCases.first(where: { category in
+                                   memories.contains(where: { $0.category == category })
+                               }) {
+                                selectedCategory = firstCategory
+                            }
+                            hasInitializedCategory = true
+                        }
+                        rebuildFindMatches(filteredMemories)
+                    }
+                    .onChange(of: findQuery) { _ in rebuildFindMatches(filteredMemories) }
+                    .onChange(of: selectedCategory) { _ in rebuildFindMatches(filteredMemories) }
                     .onChange(of: pendingFindCommand) { cmd in
                         guard let cmd else { return }
-                        applyFindCommand(cmd, memories: memories, proxy: proxy)
+                        applyFindCommand(cmd, memories: filteredMemories, proxy: proxy)
                         pendingFindCommand = nil
                     }
                 }
@@ -2960,6 +3449,334 @@ extension ColorComponents {
     }
 }
 
+final class HorizontalRuleAttachmentCell: NSTextAttachmentCell {
+    override func cellSize() -> NSSize {
+        NSSize(width: 0, height: 14) // width ignored; text view gives us the frame width
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        let y = cellFrame.midY
+        let inset: CGFloat = 0
+
+        NSColor.separatorColor.withAlphaComponent(0.9).setStroke()
+        let path = NSBezierPath()
+        path.lineWidth = 1
+        path.move(to: NSPoint(x: cellFrame.minX + inset, y: y))
+        path.line(to: NSPoint(x: cellFrame.maxX - inset, y: y))
+        path.stroke()
+    }
+}
+
+private func replaceHorizontalRules(in mutable: NSMutableAttributedString,
+                                    baseFont: NSFont,
+                                    textColor: NSColor)
+{
+    let s = mutable.string as NSString
+    let full = NSRange(location: 0, length: s.length)
+
+    // A line that is ONLY --- or *** or ___ (allow whitespace)
+    let pattern = #"(?m)^\s*([-*_])\1\1+\s*$"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    let mono = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+    let line = String(repeating: "─", count: 52) // tweak 40–80 depending on vibe
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: mono,
+        .foregroundColor: NSColor.separatorColor
+    ]
+
+    for m in re.matches(in: mutable.string, range: full).reversed() {
+        let rep = NSAttributedString(string: line + "\n", attributes: attrs)
+        mutable.replaceCharacters(in: m.range, with: rep)
+    }
+}
+
+private func replaceMarkdownTables(in mutable: NSMutableAttributedString,
+                                  baseFont: NSFont,
+                                  textColor: NSColor)
+{
+    let ns = mutable.string as NSString
+    let full = NSRange(location: 0, length: ns.length)
+
+    // Markdown table block:
+    // | a | b |
+    // |---|---|
+    // | 1 | 2 |
+    let pattern = #"(?m)(^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$\n(^\s*\|.*\|\s*$\n?)*)"#    
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    func parseRow(_ line: String) -> [String] {
+        var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("|") { t.removeFirst() }
+        if t.hasSuffix("|") { t.removeLast() }
+        return t.split(separator: "|", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    let mono = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
+    let attrs: [NSAttributedString.Key: Any] = [
+        .font: mono,
+        .foregroundColor: textColor
+    ]
+
+    for match in re.matches(in: mutable.string, range: full).reversed() {
+        let block = ns.substring(with: match.range)
+        let lines = block.split(separator: "\n", omittingEmptySubsequences: true).map(String.init)
+        guard lines.count >= 2 else { continue }
+
+        let header = parseRow(lines[0])
+        let bodyRows = lines.dropFirst(2).map(parseRow)
+        let rows = [header] + bodyRows
+
+        let colCount = rows.map(\.count).max() ?? 0
+        guard colCount > 0 else { continue }
+
+        // Column widths
+        var widths = Array(repeating: 0, count: colCount)
+        for row in rows {
+            for c in 0..<colCount {
+                let cell = (c < row.count) ? row[c] : ""
+                widths[c] = max(widths[c], cell.count)
+            }
+        }
+
+        func pad(_ s: String, to w: Int) -> String {
+            if s.count >= w { return s }
+            return s + String(repeating: " ", count: w - s.count)
+        }
+
+        func border(left: String, mid: String, right: String, fill: String = "─") -> String {
+            left + widths.map { String(repeating: fill, count: $0 + 2) }.joined(separator: mid) + right
+        }
+
+        func rowLine(_ row: [String]) -> String {
+            "│" + (0..<colCount).map { c in
+                " " + pad(c < row.count ? row[c] : "", to: widths[c]) + " "
+            }.joined(separator: "│") + "│"
+        }
+
+        var out = ""
+        out += border(left: "┌", mid: "┬", right: "┐") + "\n"
+        out += rowLine(header) + "\n"
+        out += border(left: "├", mid: "┼", right: "┤") + "\n"
+        for r in bodyRows {
+            out += rowLine(r) + "\n"
+        }
+        out += border(left: "└", mid: "┴", right: "┘") + "\n"
+
+        mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: out, attributes: attrs))
+    }
+}
+
+private func replaceTaskListCheckboxes(in mutable: NSMutableAttributedString,
+                                      baseFont: NSFont,
+                                      textColor: NSColor)
+{
+    let ns = mutable.string as NSString
+    let full = NSRange(location: 0, length: ns.length)
+
+    // Matches: "- [ ] " , "* [x] ", "1. [ ] " etc
+    let pattern = #"(?m)^[ \t]*((?:[-*+])|(?:\d+\.))[ \t]+\[( |x|X)\][ \t]+"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    for m in re.matches(in: mutable.string, range: full).reversed() {
+        let prefix = ns.substring(with: m.range(at: 1))      // "-", "*", "1.", etc
+        let checked = ns.substring(with: m.range(at: 2))     // " " or "x"
+        let box = (checked.lowercased() == "x") ? "☑" : "☐"
+
+        // Keep numbering/bullet prefix, but make it look cleaner
+        // Example: "- [ ] thing" -> "• ☐ thing"
+        // Example: "1. [x] thing" -> "1. ☑ thing"
+        let renderedPrefix: String = {
+            if prefix == "-" || prefix == "*" || prefix == "+" { return "•" }
+            return prefix
+        }()
+
+        let rep = "\(renderedPrefix) \(box) "
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: textColor
+        ]
+        mutable.replaceCharacters(in: m.range, with: NSAttributedString(string: rep, attributes: attrs))
+    }
+}
+
+private func styleBlockquotes(in mutable: NSMutableAttributedString,
+                              baseFont: NSFont)
+{
+    var ns = mutable.string as NSString
+    let full = NSRange(location: 0, length: ns.length)
+
+    // Match the leading "> " marker on each quoted line
+    let pattern = #"(?m)^[ \t]*>[ \t]?"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    for m in re.matches(in: mutable.string, range: full).reversed() {
+        let lineStart = m.range.location
+
+        // Remove the "> " marker
+        mutable.replaceCharacters(in: m.range, with: "")
+
+        // Insert a subtle bar at the start of the line
+        let barAttrs: [NSAttributedString.Key: Any] = [
+            .font: baseFont,
+            .foregroundColor: NSColor.separatorColor
+        ]
+        mutable.insert(NSAttributedString(string: "▍ ", attributes: barAttrs), at: lineStart)
+
+        // Recompute paragraph range after edits
+        ns = mutable.string as NSString
+        let paraRange = ns.paragraphRange(for: NSRange(location: lineStart, length: 0))
+
+        // Merge paragraph style (don’t nuke existing)
+        let existing = (mutable.attribute(.paragraphStyle, at: max(0, paraRange.location), effectiveRange: nil) as? NSParagraphStyle)
+        let p = (existing?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+
+        p.firstLineHeadIndent = 18
+        p.headIndent = 18
+        p.paragraphSpacingBefore = 2
+        p.paragraphSpacing = 6
+
+        mutable.addAttribute(.paragraphStyle, value: p, range: paraRange)
+    }
+}
+
+private func styleInlineCode(in mutable: NSMutableAttributedString,
+                             baseFont: NSFont)
+{
+    // We'll parse single-backtick pairs. We ignore triple backticks/code fences by only matching
+    // runs that do NOT contain newlines.
+    let s = mutable.string
+    var pairs: [(start: Int, end: Int)] = []
+
+    var i = s.startIndex
+    var open: Int? = nil
+
+    func offset(of idx: String.Index) -> Int {
+        s.distance(from: s.startIndex, to: idx)
+    }
+
+    while i < s.endIndex {
+        if s[i] == "`" {
+            let pos = offset(of: i)
+
+            // Skip ``` fences (two more backticks immediately)
+            let next1 = s.index(after: i)
+            if next1 < s.endIndex, s[next1] == "`" {
+                let next2 = s.index(after: next1)
+                if next2 < s.endIndex, s[next2] == "`" {
+                    // Jump past the fence marker
+                    i = s.index(after: next2)
+                    open = nil
+                    continue
+                }
+            }
+
+            if let o = open {
+                // Only treat as inline code if it doesn't include a newline
+                let startIdx = s.index(s.startIndex, offsetBy: o + 1)
+                let endIdx = s.index(s.startIndex, offsetBy: pos)
+                if !s[startIdx..<endIdx].contains("\n") {
+                    pairs.append((start: o, end: pos))
+                }
+                open = nil
+            } else {
+                open = pos
+            }
+        }
+        i = s.index(after: i)
+    }
+
+    let mono = NSFont.monospacedSystemFont(ofSize: max(12, baseFont.pointSize - 1), weight: .regular)
+    let bg = NSColor.controlBackgroundColor.withAlphaComponent(0.6)
+    let fg = NSColor.secondaryLabelColor
+
+    // Replace from the end so indices stay valid
+    for p in pairs.reversed() {
+        let contentRange = NSRange(location: p.start + 1, length: p.end - p.start - 1)
+
+        // Style the content
+        mutable.addAttributes([
+            .font: mono,
+            .foregroundColor: fg,
+            .backgroundColor: bg
+        ], range: contentRange)
+
+        // Remove closing ` then opening ` (reverse order)
+        mutable.deleteCharacters(in: NSRange(location: p.end, length: 1))
+        mutable.deleteCharacters(in: NSRange(location: p.start, length: 1))
+    }
+}
+
+private func styleUnorderedLists(in mutable: NSMutableAttributedString) {
+    var ns = mutable.string as NSString
+    let full = NSRange(location: 0, length: ns.length)
+
+    // Matches: "  - item", "\t* item", "+ item" (but NOT task list "- [ ]")
+    let pattern = #"(?m)^([ \t]*)([-*+])[ \t]+(?!\[)"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    let matches = re.matches(in: mutable.string, range: full).reversed()
+    for m in matches {
+        let indentStr = ns.substring(with: m.range(at: 1))
+        let indentSpaces = indentStr.filter { $0 == " " }.count + indentStr.filter { $0 == "\t" }.count * 2
+        let level = max(0, indentSpaces / 2)
+
+        let start = m.range.location
+        mutable.replaceCharacters(in: m.range, with: "• ")
+
+        ns = mutable.string as NSString
+        let paraRange = ns.paragraphRange(for: NSRange(location: start, length: 0))
+
+        let existing = mutable.attribute(.paragraphStyle, at: paraRange.location, effectiveRange: nil) as? NSParagraphStyle
+        let p = (existing?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+
+        let baseIndent: CGFloat = 18
+        let first = CGFloat(level) * baseIndent
+        p.firstLineHeadIndent = first
+        p.headIndent = first + baseIndent
+        p.lineBreakMode = .byWordWrapping
+
+        mutable.addAttribute(.paragraphStyle, value: p, range: paraRange)
+    }
+}
+
+private func styleOrderedLists(in mutable: NSMutableAttributedString) {
+    var ns = mutable.string as NSString
+    let full = NSRange(location: 0, length: ns.length)
+
+    // Matches: "  1. item"
+    let pattern = #"(?m)^([ \t]*)(\d+)\.[ \t]+"#
+    guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+
+    let matches = re.matches(in: mutable.string, range: full).reversed()
+    for m in matches {
+        let indentStr = ns.substring(with: m.range(at: 1))
+        let indentSpaces = indentStr.filter { $0 == " " }.count + indentStr.filter { $0 == "\t" }.count * 2
+        let level = max(0, indentSpaces / 2)
+
+        let number = ns.substring(with: m.range(at: 2))
+        let start = m.range.location
+
+        // Replace "   12. " with "12. "
+        mutable.replaceCharacters(in: m.range, with: "\(number). ")
+
+        ns = mutable.string as NSString
+        let paraRange = ns.paragraphRange(for: NSRange(location: start, length: 0))
+
+        let existing = mutable.attribute(.paragraphStyle, at: paraRange.location, effectiveRange: nil) as? NSParagraphStyle
+        let p = (existing?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+
+        let baseIndent: CGFloat = 18
+        let first = CGFloat(level) * baseIndent
+        p.firstLineHeadIndent = first
+        p.headIndent = first + baseIndent + 6 // a bit wider for "12."
+        p.lineBreakMode = .byWordWrapping
+
+        mutable.addAttribute(.paragraphStyle, value: p, range: paraRange)
+    }
+}
+
 // MARK: - Reminder Panel
 
 struct ReminderPanel: View {
@@ -3007,7 +3824,7 @@ struct ReminderPanel: View {
                     Divider()
 
                     ScrollView {
-                        Text(message)
+                        MarkdownText(content: message)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)

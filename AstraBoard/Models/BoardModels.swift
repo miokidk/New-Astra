@@ -274,25 +274,49 @@ struct ChatThread: Codable {
 
 struct ChatSettings: Codable {
     static let defaultModel = "gpt-5.2"
+    static let defaultVoice = "nova"
+    static let defaultAlwaysListening = false
+    static let availableVoices = [
+        "alloy",
+        "ash",
+        "coral",
+        "echo",
+        "fable",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer"
+    ]
     static let defaultSettings = ChatSettings(model: defaultModel, apiKey: "", personality: "", userName: "")
 
     var model: String
     var apiKey: String
     var personality: String
     var userName: String
+    var voice: String
+    var alwaysListening: Bool
 
     private enum CodingKeys: String, CodingKey {
         case model
         case apiKey
         case personality
         case userName
+        case voice
+        case alwaysListening
     }
 
-    init(model: String, apiKey: String, personality: String, userName: String) {
+    init(model: String,
+         apiKey: String,
+         personality: String,
+         userName: String,
+         voice: String = ChatSettings.defaultVoice,
+         alwaysListening: Bool = ChatSettings.defaultAlwaysListening) {
         self.model = model
         self.apiKey = apiKey
         self.personality = personality
         self.userName = userName
+        self.voice = ChatSettings.availableVoices.contains(voice) ? voice : ChatSettings.defaultVoice
+        self.alwaysListening = alwaysListening
     }
 
     init(from decoder: Decoder) throws {
@@ -301,6 +325,9 @@ struct ChatSettings: Codable {
         apiKey = try container.decode(String.self, forKey: .apiKey)
         personality = try container.decode(String.self, forKey: .personality)
         userName = try container.decodeIfPresent(String.self, forKey: .userName) ?? ""
+        let rawVoice = try container.decodeIfPresent(String.self, forKey: .voice) ?? Self.defaultVoice
+        voice = Self.availableVoices.contains(rawVoice) ? rawVoice : Self.defaultVoice
+        alwaysListening = try container.decodeIfPresent(Bool.self, forKey: .alwaysListening) ?? Self.defaultAlwaysListening
     }
 
     func encode(to encoder: Encoder) throws {
@@ -309,6 +336,8 @@ struct ChatSettings: Codable {
         try container.encode(apiKey, forKey: .apiKey)
         try container.encode(personality, forKey: .personality)
         try container.encode(userName, forKey: .userName)
+        try container.encode(voice, forKey: .voice)
+        try container.encode(alwaysListening, forKey: .alwaysListening)
     }
 }
 
@@ -376,17 +405,96 @@ struct ReminderItem: Codable, Identifiable {
     }
 }
 
+enum MemoryCategory: String, Codable, CaseIterable, Identifiable, Hashable {
+    case unchangeable = "unchangeable"
+    case longTerm = "long_term"
+    case shortTerm = "short_term"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .unchangeable: return "Unchangeable"
+        case .longTerm: return "Long Term"
+        case .shortTerm: return "Short Term"
+        }
+    }
+
+    static func fromString(_ raw: String) -> MemoryCategory? {
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+            .replacingOccurrences(of: " ", with: "_")
+        switch normalized {
+        case "unchangeable", "unchangable", "immutable", "permanent", "facts", "fact":
+            return .unchangeable
+        case "long_term", "longterm", "long":
+            return .longTerm
+        case "short_term", "shortterm", "short":
+            return .shortTerm
+        default:
+            return nil
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let raw = (try? container.decode(String.self)) ?? ""
+        self = MemoryCategory.fromString(raw) ?? .longTerm
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
+}
+
 struct Memory: Codable, Identifiable, Hashable {
     var id: UUID
     var text: String
     var image: ImageRef? // nil for text-only memories
     var createdAt: Double
+    var category: MemoryCategory
 
-    init(id: UUID = UUID(), text: String, image: ImageRef? = nil, createdAt: Double = Date().timeIntervalSince1970) {
+    init(id: UUID = UUID(),
+         text: String,
+         image: ImageRef? = nil,
+         createdAt: Double = Date().timeIntervalSince1970,
+         category: MemoryCategory = .longTerm) {
         self.id = id
         self.text = text
         self.image = image
         self.createdAt = createdAt
+        self.category = category
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case text
+        case image
+        case createdAt
+        case category
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? container.decode(UUID.self, forKey: .id)) ?? UUID()
+        text = (try? container.decode(String.self, forKey: .text)) ?? ""
+        image = try? container.decodeIfPresent(ImageRef.self, forKey: .image)
+        createdAt = (try? container.decodeIfPresent(Double.self, forKey: .createdAt))
+            ?? Date().timeIntervalSince1970
+        category = (try? container.decodeIfPresent(MemoryCategory.self, forKey: .category))
+            ?? .longTerm
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(text, forKey: .text)
+        try container.encodeIfPresent(image, forKey: .image)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(category, forKey: .category)
     }
 }
 
@@ -458,20 +566,208 @@ struct PanelsState: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         chat = try container.decode(PanelBox.self, forKey: .chat)
         chatArchive = try container.decodeIfPresent(PanelBox.self, forKey: .chatArchive)
-            ?? PanelBox(isOpen: false, x: 360, y: 140, w: 320, h: 400)
+            ?? PanelBox(isOpen: false, x: 320, y: 140, w: 420, h: 520)
         log = try container.decode(PanelBox.self, forKey: .log)
 
         memories = try container.decodeIfPresent(PanelBox.self, forKey: .memories)
-            ?? PanelBox(isOpen: false, x: 320, y: 200, w: 320, h: 400)
+            ?? PanelBox(isOpen: false, x: 300, y: 200, w: 420, h: 520)
 
         shapeStyle = try container.decodeIfPresent(PanelBox.self, forKey: .shapeStyle)
-            ?? PanelBox(isOpen: false, x: 640, y: 140, w: 280, h: 260)
+            ?? PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320)
         settings = try container.decodeIfPresent(PanelBox.self, forKey: .settings)
-            ?? PanelBox(isOpen: false, x: 640, y: 120, w: 320, h: 220)
+            ?? PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520)
         personality = try container.decodeIfPresent(PanelBox.self, forKey: .personality)
-            ?? PanelBox(isOpen: false, x: 640, y: 360, w: 320, h: 260)
+            ?? PanelBox(isOpen: false, x: 640, y: 360, w: 380, h: 320)
         reminder = try container.decodeIfPresent(PanelBox.self, forKey: .reminder) // Decode new property
-            ?? PanelBox(isOpen: false, x: 400, y: 100, w: 320, h: 200) // Default value for reminder panel
+            ?? PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Default value for reminder panel
+    }
+}
+
+// MARK: - Workspace Mode
+
+enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
+    case canvas
+    case notes
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .canvas: return "Canvas"
+        case .notes: return "Notes"
+        }
+    }
+}
+
+// MARK: - Notes Workspace
+
+struct NotesSelection: Codable, Hashable {
+    var stackID: UUID?
+    var notebookID: UUID?
+    var sectionID: UUID?
+    var noteID: UUID?
+}
+
+struct NoteItem: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var body: String
+    var createdAt: Double
+    var updatedAt: Double
+}
+
+extension NoteItem {
+    /// Sidebar/Lists title: prefers `title`, otherwise uses the first few words of `body`.
+    var displayTitle: String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty { return trimmedTitle }
+
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedBody.isEmpty { return "Untitled" }
+
+        // Collapse whitespace/newlines, take first N words.
+        let normalized = trimmedBody
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+
+        let words = normalized.split(whereSeparator: { $0.isWhitespace })
+        let maxWords = 8
+
+        if words.count <= maxWords {
+            return words.map(String.init).joined(separator: " ")
+        } else {
+            return words.prefix(maxWords).map(String.init).joined(separator: " ") + "…"
+        }
+    }
+}
+
+struct NoteSection: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var notes: [NoteItem]
+}
+
+struct NoteNotebook: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var sections: [NoteSection]
+    var notes: [NoteItem]
+
+    init(id: UUID, title: String, sections: [NoteSection], notes: [NoteItem] = []) {
+        self.id = id
+        self.title = title
+        self.sections = sections
+        self.notes = notes
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, title, sections, notes }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        sections = try c.decodeIfPresent([NoteSection].self, forKey: .sections) ?? []
+        notes = try c.decodeIfPresent([NoteItem].self, forKey: .notes) ?? []
+    }
+}
+
+struct NoteStack: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var notebooks: [NoteNotebook]
+    var notes: [NoteItem]
+
+    init(id: UUID, title: String, notebooks: [NoteNotebook], notes: [NoteItem] = []) {
+        self.id = id
+        self.title = title
+        self.notebooks = notebooks
+        self.notes = notes
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, title, notebooks, notes }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        notebooks = try c.decodeIfPresent([NoteNotebook].self, forKey: .notebooks) ?? []
+        notes = try c.decodeIfPresent([NoteItem].self, forKey: .notes) ?? []
+    }
+}
+
+struct NotesWorkspace: Codable {
+    var stacks: [NoteStack]
+    var selection: NotesSelection
+    var sidebarCollapsed: Bool
+    /// The dedicated stack that holds Quick Notes. This one cannot be renamed or deleted.
+    var quickNotesStackID: UUID
+
+    static func `default`(now: Double = Date().timeIntervalSince1970) -> NotesWorkspace {
+        let quickStackID = UUID()
+        let quickStack = NoteStack(
+            id: quickStackID,
+            title: "Quick Notes",
+            notebooks: [],
+            notes: []
+        )
+
+        return NotesWorkspace(
+            stacks: [quickStack],
+            selection: NotesSelection(stackID: quickStackID, notebookID: nil, sectionID: nil, noteID: nil),
+            sidebarCollapsed: false,
+            quickNotesStackID: quickStackID
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case stacks, selection, sidebarCollapsed, quickNotesStackID
+    }
+
+    init(stacks: [NoteStack], selection: NotesSelection, sidebarCollapsed: Bool, quickNotesStackID: UUID) {
+        self.stacks = stacks
+        self.selection = selection
+        self.sidebarCollapsed = sidebarCollapsed
+        self.quickNotesStackID = quickNotesStackID
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        var decodedStacks = try c.decodeIfPresent([NoteStack].self, forKey: .stacks) ?? []
+        let decodedSelection = try c.decodeIfPresent(NotesSelection.self, forKey: .selection) ?? NotesSelection()
+        let decodedCollapsed = try c.decodeIfPresent(Bool.self, forKey: .sidebarCollapsed) ?? false
+
+        let qID = try c.decodeIfPresent(UUID.self, forKey: .quickNotesStackID)
+        let quickID: UUID
+        if let qID {
+            quickID = qID
+        } else if let existing = decodedStacks.first(where: { $0.title == "Quick Notes" }) {
+            quickID = existing.id
+        } else {
+            let newID = UUID()
+            decodedStacks.insert(NoteStack(id: newID, title: "Quick Notes", notebooks: [], notes: []), at: 0)
+            quickID = newID
+        }
+
+        var fixedSelection = decodedSelection
+        if fixedSelection.stackID == nil || !decodedStacks.contains(where: { $0.id == fixedSelection.stackID }) {
+            fixedSelection.stackID = quickID
+            fixedSelection.notebookID = nil
+            fixedSelection.sectionID = nil
+            fixedSelection.noteID = nil
+        }
+
+        self.stacks = decodedStacks
+        self.selection = fixedSelection
+        self.sidebarCollapsed = decodedCollapsed
+        self.quickNotesStackID = quickID
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(stacks, forKey: .stacks)
+        try c.encode(selection, forKey: .selection)
+        try c.encode(sidebarCollapsed, forKey: .sidebarCollapsed)
+        try c.encode(quickNotesStackID, forKey: .quickNotesStackID)
     }
 }
 
@@ -482,13 +778,18 @@ struct UIState: Codable {
     var panels: PanelsState
     var hudBarColor: ColorComponents
     var hudBarOpacity: Double
+    var workspaceMode: WorkspaceMode
 
-    init(hud: FloatingBox,
-         panels: PanelsState,
-         hudBarColor: ColorComponents = UIState.defaultHUDBarColor,
-         hudBarOpacity: Double = 1.0) {
+    init(
+        hud: FloatingBox,
+        panels: PanelsState,
+        workspaceMode: WorkspaceMode = .canvas,
+        hudBarColor: ColorComponents = UIState.defaultHUDBarColor,
+        hudBarOpacity: Double = 1.0
+    ) {
         self.hud = hud
         self.panels = panels
+        self.workspaceMode = workspaceMode
         self.hudBarColor = hudBarColor
         self.hudBarOpacity = hudBarOpacity
     }
@@ -496,6 +797,7 @@ struct UIState: Codable {
     private enum CodingKeys: String, CodingKey {
         case hud
         case panels
+        case workspaceMode
         case hudBarColor
         case hudBarOpacity
     }
@@ -504,6 +806,7 @@ struct UIState: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         hud = try container.decode(FloatingBox.self, forKey: .hud)
         panels = try container.decode(PanelsState.self, forKey: .panels)
+        workspaceMode = try container.decodeIfPresent(WorkspaceMode.self, forKey: .workspaceMode) ?? .canvas
         hudBarColor = try container.decodeIfPresent(ColorComponents.self, forKey: .hudBarColor)
             ?? UIState.defaultHUDBarColor
         hudBarOpacity = try container.decodeIfPresent(Double.self, forKey: .hudBarOpacity) ?? 1.0
@@ -513,6 +816,7 @@ struct UIState: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(hud, forKey: .hud)
         try container.encode(panels, forKey: .panels)
+        try container.encode(workspaceMode, forKey: .workspaceMode) // ✅ add
         try container.encode(hudBarColor, forKey: .hudBarColor)
         try container.encode(hudBarOpacity, forKey: .hudBarOpacity)
     }
@@ -534,6 +838,7 @@ struct BoardDoc: Codable, Identifiable {
     var log: [LogItem]
     var ui: UIState
     var reminders: [ReminderItem]
+    var notes: NotesWorkspace
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -551,6 +856,7 @@ struct BoardDoc: Codable, Identifiable {
         case log
         case ui
         case reminders
+        case notes
     }
 
     init(
@@ -584,6 +890,7 @@ struct BoardDoc: Codable, Identifiable {
         self.log = log
         self.ui = ui
         self.reminders = []
+        self.notes = NotesWorkspace.default(now: createdAt)
     }
 
     init(from decoder: Decoder) throws {
@@ -601,6 +908,9 @@ struct BoardDoc: Codable, Identifiable {
         chatHistory = try container.decodeIfPresent([ChatThread].self, forKey: .chatHistory) ?? []
         pendingClarification = try container.decodeIfPresent(PendingClarification.self, forKey: .pendingClarification)
         reminders = try container.decodeIfPresent([ReminderItem].self, forKey: .reminders) ?? []
+
+        notes = try container.decodeIfPresent(NotesWorkspace.self, forKey: .notes)
+        ?? NotesWorkspace.default(now: Date().timeIntervalSince1970)
 
         // ✅ back-compat: older docs may not have this key
         if let memories = try? container.decodeIfPresent([Memory].self, forKey: .memories) {
@@ -632,6 +942,7 @@ struct BoardDoc: Codable, Identifiable {
         try container.encode(log, forKey: .log)
         try container.encode(ui, forKey: .ui)
         try container.encode(reminders, forKey: .reminders)
+        try container.encode(notes, forKey: .notes)
     }
 }
 
@@ -672,14 +983,14 @@ extension BoardDoc {
         let now = Date().timeIntervalSince1970
         let hud = FloatingBox(isVisible: true, x: 40, y: 40)
         let panels = PanelsState(
-            chat: PanelBox(isOpen: false, x: 260, y: 120, w: 320, h: 400),
-            chatArchive: PanelBox(isOpen: false, x: 360, y: 140, w: 320, h: 400),
-            log: PanelBox(isOpen: false, x: 300, y: 180, w: 320, h: 400),
-            memories: PanelBox(isOpen: false, x: 320, y: 200, w: 320, h: 400),
-            shapeStyle: PanelBox(isOpen: false, x: 640, y: 140, w: 280, h: 260),
-            settings: PanelBox(isOpen: false, x: 640, y: 120, w: 320, h: 220),
-            personality: PanelBox(isOpen: false, x: 640, y: 360, w: 320, h: 260),
-            reminder: PanelBox(isOpen: false, x: 400, y: 100, w: 320, h: 200) // Initialize new reminder panel
+            chat: PanelBox(isOpen: false, x: 240, y: 120, w: 420, h: 520),
+            chatArchive: PanelBox(isOpen: false, x: 320, y: 140, w: 420, h: 520),
+            log: PanelBox(isOpen: false, x: 280, y: 180, w: 420, h: 520),
+            memories: PanelBox(isOpen: false, x: 300, y: 200, w: 420, h: 520),
+            shapeStyle: PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320),
+            settings: PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520),
+            personality: PanelBox(isOpen: false, x: 640, y: 360, w: 380, h: 320),
+            reminder: PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Initialize new reminder panel
         )
         return BoardDoc(
             id: UUID(),
@@ -753,141 +1064,236 @@ struct PendingClarification: Codable {
     }
 }
 
-// MARK: - Reminder routing (router -> app)
+// MARK: - Routing / orchestration models
 
-struct ReminderRouting: Decodable {
-    struct Schedule: Decodable {
-        /// "once", "daily", "weekly"
-        let type: String? // Made optional
+struct Clarifier: Codable, Hashable {
+    let question: String
+    let answer: String
+}
+
+struct RoutedContextItem: Decodable, Hashable {
+    let id: String
+    let excerpt: String
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case excerpt
+    }
+
+    init(id: String, excerpt: String) {
+        self.id = id
+        self.excerpt = excerpt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? container.decode(String.self, forKey: .id)) ?? ""
+        excerpt = (try? container.decode(String.self, forKey: .excerpt)) ?? ""
+    }
+}
+
+struct ReminderActionPayload: Decodable, Hashable {
+    struct Schedule: Decodable, Hashable {
+        /// "once", "hourly", "daily", "weekly", "monthly", "yearly"
+        let type: String?
         /// ISO8601 string. Example: "2026-01-10T09:00:00-06:00"
-        let at: String? // Made optional
+        let at: String?
         /// Only for weekly
         let weekdays: [String]?
         /// Optional, default 1
         let interval: Int?
     }
 
-    /// "create" | "list" | "cancel"
-    let action: String
-    /// Used for create/cancel (fallback title match)
     let title: String?
-    /// What to do at reminder time
     let work: String?
-    /// Schedule block for create
     let schedule: Schedule?
-    /// Used for cancel by id
     let targetId: String?
-}
-struct RouterDecision: Decodable {
-    struct BoardSelection: Decodable {
-        let selectedEntryIds: [String]
-        let boardInjection: String
-
-        private enum CodingKeys: String, CodingKey {
-            case selectedEntryIds = "selected_entry_ids"
-            case selectedEntries = "selected_entries"
-            case boardInjection = "board_injection"
-        }
-
-        init(selectedEntryIds: [String], boardInjection: String) {
-            self.selectedEntryIds = selectedEntryIds
-            self.boardInjection = boardInjection
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            selectedEntryIds = (try? container.decode([String].self, forKey: .selectedEntryIds))
-                ?? (try? container.decode([String].self, forKey: .selectedEntries))
-                ?? []
-            boardInjection = (try? container.decode(String.self, forKey: .boardInjection)) ?? ""
-        }
-    }
-
-    let intent: [String]
-    let tasks: [String: [String]]
-    let complexity: String
-    let needsClarification: Bool
-    let clarifyingQuestion: String?
-    let tellUserOnRouterFail: Bool
-    let userName: String?
-    let textInstruction: String?
-    let boardSelection: BoardSelection
-    let memorySelection: MemorySelection
-    let reminder: ReminderRouting?
+    let query: String?
 
     private enum CodingKeys: String, CodingKey {
-        case intent
-        case tasks
-        case complexity
-        case needsClarification = "needs_clarification"
-        case clarificationNeeded = "clarification_needed"
-        case clarifyingQuestion = "clarifying_question"
-        case clarificationQuestion = "clarification_question"
-        case tellUserOnRouterFail = "tell_user_on_router_fail"
-        case userName = "user's name"
-        case textInstruction = "text_instruction"
-        case boardSelection = "board_selection"
-        case memorySelection = "memory_selection"
-        case memorySelectionAlt = "memorySelection"
+        case title
+        case work
+        case schedule
+        case targetId = "target_id"
+        case query
+    }
+}
+
+// MARK: - Notes actions (create/edit/delete/move)
+
+struct NotesPath: Decodable, Hashable {
+    // Prefer IDs when possible (deterministic).
+    var stackID: UUID?
+    var notebookID: UUID?
+    var sectionID: UUID?
+
+    // Optional title-based targeting (fallback).
+    var stackTitle: String?
+    var notebookTitle: String?
+    var sectionTitle: String?
+
+    // Optional behavior: if title-based target doesn't exist, create it.
+    var createIfMissing: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case stackID = "stack_id"
+        case notebookID = "notebook_id"
+        case sectionID = "section_id"
+        case stackTitle = "stack_title"
+        case notebookTitle = "notebook_title"
+        case sectionTitle = "section_title"
+        case createIfMissing = "create_if_missing"
+    }
+}
+
+struct NoteBodyEdit: Decodable, Hashable {
+    /// "replace_all" | "append" | "prepend" | "find_replace"
+    var op: String
+    var text: String?
+    var find: String?
+    var replace: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case op
+        case text
+        case find
+        case replace
+    }
+}
+
+struct NotesActionPayload: Decodable, Hashable {
+    /// "create" | "update" | "delete" | "move"
+    var op: String
+
+    // Targets
+    var noteID: UUID?
+    var from: NotesPath?
+    var to: NotesPath?
+
+    // Content changes
+    var title: String?
+    var body: String?
+    var bodyEdits: [NoteBodyEdit]?
+
+    // Response behavior
+    var selectAfter: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case op
+        case noteID = "note_id"
+        case from
+        case to
+        case title
+        case body
+        case bodyEdits = "body_edits"
+        case selectAfter = "select_after"
+    }
+}
+
+struct RoutedActionStep: Decodable, Hashable {
+    let step: Int
+    let actionType: String
+    let relevantBoard: [RoutedContextItem]
+    let relevantMemory: [RoutedContextItem]
+    let relevantChat: [RoutedContextItem]
+    let routerNotes: String?
+    let searchQueries: [String]
+    let searchQuery: String?
+    let reminder: ReminderActionPayload?
+
+    private enum CodingKeys: String, CodingKey {
+        case step
+        case actionType = "action_type"
+        case actionTypeAlt = "actionType"
+        case relevantBoard = "relevant_board"
+        case relevantMemory = "relevant_memory"
+        case relevantChat = "relevant_chat"
+        case relevantChatAlt = "relevantChat"
+        case routerNotes = "router_notes"
+        case searchQueries = "search_queries"
+        case searchQueriesAlt = "queries"
+        case searchQuery = "search_query"
+        case searchQueryAlt = "query"
         case reminder
     }
-    
-    struct MemorySelection: Decodable {
-        let selectedMemories: [String]
-        let memoryInjection: String
 
-        private enum CodingKeys: String, CodingKey {
-            case selectedMemories = "selected_memories"
-            case selectedMemoriesAlt = "selectedMemories"
-            case memoryInjection = "memory_injection"
-            case memoryInjectionAlt = "memoryInjection"
-            case memorySelection = "memory_selection"
-            case memorySelectionAlt = "memorySelection"
-            
-        }
-
-        init(selectedMemories: [String], memoryInjection: String) {
-            self.selectedMemories = selectedMemories
-            self.memoryInjection = memoryInjection
-        }
-
-        init(from decoder: Decoder) throws {
-            let container = try decoder.container(keyedBy: CodingKeys.self)
-            selectedMemories =
-                (try? container.decode([String].self, forKey: .selectedMemories)) ??
-                (try? container.decode([String].self, forKey: .selectedMemoriesAlt)) ??
-                []
-            memoryInjection =
-                (try? container.decode(String.self, forKey: .memoryInjection)) ??
-                (try? container.decode(String.self, forKey: .memoryInjectionAlt)) ??
-                ""
-        }
+    init(step: Int,
+         actionType: String,
+         relevantBoard: [RoutedContextItem],
+         relevantMemory: [RoutedContextItem],
+         relevantChat: [RoutedContextItem] = [],
+         routerNotes: String? = nil,
+         searchQueries: [String] = [],
+         searchQuery: String? = nil,
+         reminder: ReminderActionPayload? = nil) {
+        self.step = step
+        self.actionType = actionType
+        self.relevantBoard = relevantBoard
+        self.relevantMemory = relevantMemory
+        self.relevantChat = relevantChat
+        self.routerNotes = routerNotes
+        self.searchQueries = searchQueries
+        self.searchQuery = searchQuery
+        self.reminder = reminder
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let intents = try? container.decode([String].self, forKey: .intent) {
-            intent = intents
-        } else if let single = try? container.decode(String.self, forKey: .intent) {
-            intent = [single]
-        } else {
-            intent = []
-        }
-        tasks = (try? container.decode([String: [String]].self, forKey: .tasks)) ?? [:]
-        complexity = (try? container.decode(String.self, forKey: .complexity)) ?? "simple"
-        needsClarification = (try? container.decode(Bool.self, forKey: .needsClarification))
-            ?? (try? container.decode(Bool.self, forKey: .clarificationNeeded))
-            ?? false
-        clarifyingQuestion = (try? container.decode(String.self, forKey: .clarifyingQuestion))
-            ?? (try? container.decode(String.self, forKey: .clarificationQuestion))
-        tellUserOnRouterFail = (try? container.decode(Bool.self, forKey: .tellUserOnRouterFail)) ?? false
-        userName = try? container.decode(String.self, forKey: .userName)
-        textInstruction = try? container.decode(String.self, forKey: .textInstruction)
-        boardSelection = (try? container.decode(BoardSelection.self, forKey: .boardSelection)) ?? BoardSelection(selectedEntryIds: [], boardInjection: "")
-        memorySelection =
-            (try? container.decode(MemorySelection.self, forKey: .memorySelection)) ??
-            (try? container.decode(MemorySelection.self, forKey: .memorySelectionAlt)) ??
-            MemorySelection(selectedMemories: [], memoryInjection: "")
-        reminder = try container.decodeIfPresent(ReminderRouting.self, forKey: .reminder)
+        step = (try? container.decode(Int.self, forKey: .step)) ?? 0
+        actionType = (try? container.decode(String.self, forKey: .actionType))
+            ?? (try? container.decode(String.self, forKey: .actionTypeAlt))
+            ?? ""
+        relevantBoard = (try? container.decode([RoutedContextItem].self, forKey: .relevantBoard)) ?? []
+        relevantMemory = (try? container.decode([RoutedContextItem].self, forKey: .relevantMemory)) ?? []
+        relevantChat =
+            (try? container.decode([RoutedContextItem].self, forKey: .relevantChat)) ??
+            (try? container.decode([RoutedContextItem].self, forKey: .relevantChatAlt)) ??
+            []
+        routerNotes = try? container.decode(String.self, forKey: .routerNotes)
+        searchQueries =
+            (try? container.decode([String].self, forKey: .searchQueries)) ??
+            (try? container.decode([String].self, forKey: .searchQueriesAlt)) ??
+            []
+        searchQuery =
+            (try? container.decode(String.self, forKey: .searchQuery)) ??
+            (try? container.decode(String.self, forKey: .searchQueryAlt))
+        reminder = try? container.decode(ReminderActionPayload.self, forKey: .reminder)
+    }
+}
+
+struct OrchestrationRequest: Decodable, Hashable {
+    let type: String
+    let originalUserMessage: String
+    let clarifiers: [Clarifier]
+    let notesFromRouter: String?
+    let actionPlan: [RoutedActionStep]
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case originalUserMessage = "original_user_message"
+        case clarifiers
+        case notesFromRouter = "notes_from_router"
+        case actionPlan = "action_plan"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = (try? container.decode(String.self, forKey: .type)) ?? ""
+        originalUserMessage = (try? container.decode(String.self, forKey: .originalUserMessage)) ?? ""
+        clarifiers = (try? container.decode([Clarifier].self, forKey: .clarifiers)) ?? []
+        notesFromRouter = try? container.decode(String.self, forKey: .notesFromRouter)
+        actionPlan = (try? container.decode([RoutedActionStep].self, forKey: .actionPlan)) ?? []
+    }
+
+    init(type: String,
+         originalUserMessage: String,
+         clarifiers: [Clarifier],
+         notesFromRouter: String? = nil,
+         actionPlan: [RoutedActionStep]) {
+        self.type = type
+        self.originalUserMessage = originalUserMessage
+        self.clarifiers = clarifiers
+        self.notesFromRouter = notesFromRouter
+        self.actionPlan = actionPlan
     }
 }

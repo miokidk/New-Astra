@@ -5,6 +5,7 @@ struct ToolPaletteView: View {
     @EnvironmentObject var store: BoardStore
     @Environment(\.colorScheme) private var colorScheme
     @State private var showClearConfirm = false
+    @State private var showBoardsPopover = false
 
     private var paletteTools: [BoardTool] {
         BoardTool.allCases.filter { $0 != .select }
@@ -109,8 +110,27 @@ struct ToolPaletteView: View {
             .buttonStyle(.plain)
 
             Button {
+                showBoardsPopover.toggle()
+            } label: {
+                Image(systemName: "square.grid.2x2")
+                    .frame(width: 32, height: 32)
+                    .background(showBoardsPopover ? activeButtonBackground : buttonBackground)
+                    .foregroundColor(.primary)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+                    .cornerRadius(8)
+                    .help("Boards")
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showBoardsPopover, arrowEdge: .bottom) {
+                BoardsPopoverView(onDismiss: {
+                    showBoardsPopover = false
+                    store.hideToolMenu()
+                })
+                .environmentObject(store)
+            }
+
+            Button {
                 showClearConfirm = true
-                store.hideToolMenu()
             } label: {
                 Image(systemName: "trash")
                     .frame(width: 32, height: 32)
@@ -128,6 +148,7 @@ struct ToolPaletteView: View {
         .confirmationDialog("Clear the board?", isPresented: $showClearConfirm) {
             Button("Clear Board", role: .destructive) {
                 store.clearBoard()
+                store.hideToolMenu()
             }
         }
     }

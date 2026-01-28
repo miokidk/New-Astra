@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import AstraBoard // Assuming the module name is AstraBoard
 
 
@@ -24,22 +25,137 @@ extension FocusedValues {
 }
 
 
+@MainActor
 final class AstraAppModel: ObservableObject {
     let persistence = PersistenceService()
     let aiService = AIService()
     let webSearchService = WebSearchService()
+    let authService = AuthService()
+    lazy var voiceStore: BoardStore = BoardStore(
+        boardID: defaultBoardId,
+        persistence: persistence,
+        aiService: aiService,
+        webSearchService: webSearchService,
+        authService: authService
+    )
+    @Published private(set) var isWakeListening: Bool = false
+    @Published var pendingWakeWord: Bool = false
+    @Published var isVoicePillOpen: Bool = false
+
+    private let wakeListener = VoiceWakeListener()
+    private var persistenceObserver: NSObjectProtocol?
+    private var openWindowHandler: ((UUID) -> Void)?
+    private var openVoicePillHandler: (() -> Void)?
+    private var alwaysListeningEnabled = false
 
     var defaultBoardId: UUID {
         persistence.defaultBoardId()
     }
 
+    init() {
+        configureWakeListener()
+        let globals = persistence.loadGlobalSettings()
+        updateWakeListening(globals.alwaysListening)
+        startObservingPersistence()
+    }
+
+    deinit {
+        if let observer = persistenceObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        let listener = wakeListener
+        Task { @MainActor in
+            listener.stopListening()
+        }
+    }
+
     func createBoard() -> UUID {
         persistence.createBoard().id
     }
+
+    func registerOpenWindow(_ handler: @escaping (UUID) -> Void) {
+        openWindowHandler = handler
+    }
+
+    func registerOpenVoicePill(_ handler: @escaping () -> Void) {
+        openVoicePillHandler = handler
+    }
+
+    func markWakeWordHandled() {
+        pendingWakeWord = false
+    }
+
+    func pauseWakeListening() {
+        wakeListener.stopListening()
+        isWakeListening = false
+    }
+
+    func resumeWakeListeningIfNeeded() {
+        guard alwaysListeningEnabled else { return }
+        Task {
+            let started = await wakeListener.startListening()
+            isWakeListening = started
+        }
+    }
+
+    private func configureWakeListener() {
+        wakeListener.onWake = { [weak self] in
+            Task { @MainActor in
+                self?.handleWakeWord()
+            }
+        }
+    }
+
+    private func handleWakeWord() {
+        pendingWakeWord = true
+        let hasVisibleWindow = NSApp.windows.contains { $0.isVisible && $0.canBecomeKey }
+        if !hasVisibleWindow {
+            if !isVoicePillOpen {
+                if let openVoicePillHandler {
+                    openVoicePillHandler()
+                } else {
+                    openWindowHandler?(defaultBoardId)
+                }
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func startObservingPersistence() {
+        persistenceObserver = NotificationCenter.default.addObserver(
+            forName: .persistenceDidChange,
+            object: persistence,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            guard let event = note.userInfo?[PersistenceService.changeNotificationUserInfoKey]
+                    as? PersistenceService.ChangeEvent else { return }
+            if case .globalSettings = event {
+                let globals = persistence.loadGlobalSettings()
+                updateWakeListening(globals.alwaysListening)
+            }
+        }
+    }
+
+    private func updateWakeListening(_ enabled: Bool) {
+        alwaysListeningEnabled = enabled
+        if enabled {
+            Task {
+                let started = await wakeListener.startListening()
+                isWakeListening = started
+            }
+        } else {
+            wakeListener.stopListening()
+            isWakeListening = false
+            pendingWakeWord = false
+        }
+    }
 }
 
-/// One SwiftUI scene (window/tab) == one board.
+/// One SwiftUI scene manages one active board at a time.
 struct BoardRootView: View {
+    @Environment(\.openWindow) private var openWindow
+    @EnvironmentObject var appModel: AstraAppModel
     @StateObject private var store: BoardStore
 
     init(boardID: UUID, appModel: AstraAppModel) {
@@ -47,37 +163,39 @@ struct BoardRootView: View {
             boardID: boardID,
             persistence: appModel.persistence,
             aiService: appModel.aiService,
-            webSearchService: appModel.webSearchService
+            webSearchService: appModel.webSearchService,
+            authService: appModel.authService
         ))
     }
 
     var body: some View {
         MainView()
             .environmentObject(store)
+            .environmentObject(store.authService)
+            .environmentObject(store.syncService)
             .focusedSceneObject(store)
+            .onAppear {
+                appModel.registerOpenWindow { id in
+                    openWindow(value: id)
+                }
+                appModel.registerOpenVoicePill {
+                    openWindow(id: VoicePillWindow.id)
+                }
+            }
     }
 }
 
 struct AstraCommands: Commands {
-    @Environment(\.openWindow) private var openWindow
     @FocusedObject private var store: BoardStore?
     @FocusedValue(\.findTarget) private var findTarget
 
-    let appModel: AstraAppModel
-
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Board Tab") {
-                let id = appModel.createBoard()
-                openWindow(value: id)
-            }
-            .keyboardShortcut("t", modifiers: [.command])
-
-            Button("New Board Window") {
-                let id = appModel.createBoard()
-                openWindow(value: id)
+            Button("New Board") {
+                store?.createBoard()
             }
             .keyboardShortcut("n", modifiers: [.command])
+            .disabled(store == nil)
         }
 
         CommandGroup(replacing: .undoRedo) {
@@ -132,38 +250,109 @@ struct AstraCommands: Commands {
     }
 }
 
+import ServiceManagement
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+}
+
+enum LoginItemManager {
+    static func setEnabled(_ enabled: Bool) {
+        if #available(macOS 13.0, *) {
+            do {
+                if enabled { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            } catch { print("Launch at login error:", error) }
+        }
+    }
+}
+
+struct MenuBarMenu: View {
+    @EnvironmentObject var appModel: AstraAppModel
+    @Environment(\.openWindow) private var openWindow
+    @AppStorage("launchAtLogin") private var launchAtLogin = true
+
+    var body: some View {
+        Group {
+            Button("Open Astra") {
+                openWindow(value: appModel.defaultBoardId)
+                NSApp.activate(ignoringOtherApps: true)
+            }
+
+            Divider()
+
+            Toggle("Launch at Login", isOn: $launchAtLogin)
+                .onChange(of: launchAtLogin) { LoginItemManager.setEnabled($0) }
+
+            Divider()
+
+            Button("Quit Astra") { NSApp.terminate(nil) }
+        }
+        .onAppear {
+            appModel.registerOpenWindow { id in openWindow(value: id) }
+            appModel.registerOpenVoicePill { openWindow(id: VoicePillWindow.id) }
+        }
+    }
+}
+
 @main
 struct AstraBoardApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appModel = AstraAppModel()
 
     var body: some Scene {
         WindowGroup(for: UUID.self) { boardID in
-            // boardID is Binding<UUID?>
             let resolved: UUID = {
                 if let id = boardID.wrappedValue { return id }
-
-                let id = appModel.createBoard() // or appModel.defaultBoardId if you don't want auto-new
+                let id = appModel.defaultBoardId
                 DispatchQueue.main.async { boardID.wrappedValue = id }
                 return id
             }()
 
             BoardRootView(boardID: resolved, appModel: appModel)
-                .environmentObject(appModel)   // ✅ View-level (works on older macOS)
+                .environmentObject(appModel)
+                .onOpenURL { url in
+                    guard AuthService.isAuthCallbackURL(url) else { return }
+                    Task {
+                        do {
+                            try await appModel.authService.handleOpenURL(url)
+                        } catch {
+                            NSLog("Supabase auth: callback handling failed: \(error)")
+                        }
+                    }
+                }
         }
         .windowStyle(.titleBar)
-        .commands {
-            AstraCommands(appModel: appModel)
+        .commands { AstraCommands() }
+
+        Window("Voice Pill", id: VoicePillWindow.id) {
+            VoicePillRootView(appModel: appModel)
+                .environmentObject(appModel)
         }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: VoicePillWindow.size.width, height: VoicePillWindow.size.height)
+
+        MenuBarExtra("Astra", systemImage: "sparkles") {
+            MenuBarMenu()
+                .environmentObject(appModel)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
-
 struct MainView: View {
     @EnvironmentObject var store: BoardStore
     @State private var activeTextEdit: UUID?
     @State private var chatInput: String = ""
     @State private var previousActiveTextEdit: UUID?
+    @State private var showingCameraCapture = false
+    @State private var pendingCameraMessage: String?
+    @State private var pendingCameraVoiceInput = false
     
     @State private var toolPaletteFrame: CGRect = .zero
+    @State private var toolPaletteSize: CGSize = .zero
 
     private struct ToolPaletteFrameKey: PreferenceKey {
         static var defaultValue: CGRect = .zero
@@ -174,72 +363,64 @@ struct MainView: View {
         }
     }
 
+    private struct ToolPaletteSizeKey: PreferenceKey {
+        static var defaultValue: CGSize = .zero
+
+        static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+            let next = nextValue()
+            if next != .zero { value = next }
+        }
+    }
+
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
-                BoardGridView()
-                BoardWorldView(activeTextEdit: $activeTextEdit)
-                if store.isToolMenuVisible {
-                    let menuSize = CGSize(width: 420, height: 64) // rough clamp box for the palette
-                    let raw = store.toolMenuScreenPosition
-                    let padding: CGFloat = 8
-                    let offsetFromCursor: CGFloat = 12
-
-                    let x = min(max(raw.x + offsetFromCursor, padding), geo.size.width - menuSize.width - padding)
-                    let y = min(max(raw.y + offsetFromCursor, padding), geo.size.height - menuSize.height - padding)
-
-                    ToolPaletteView()
-                        .offset(x: x, y: y)
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear
-                                    .preference(
-                                        key: ToolPaletteFrameKey.self,
-                                        value: proxy.frame(in: .named("MainViewSpace"))
-                                    )
-                            }
-                        )
-                        .zIndex(15)
-                        .transition(.opacity)
-                }
-                
+                workspaceLayer
+                toolPaletteOverlay(in: geo)
 
                 FloatingPanelHostView(chatInput: $chatInput, onSend: submitChat)
                     .zIndex(10)
 
                 HUDView(chatInput: $chatInput, onSend: submitChat)
-                    .zIndex(20)   // always clickable
+                    .zIndex(20)
 
                 ReminderPanel()
                     .zIndex(25)
+
+                if store.doc.ui.workspaceMode == .canvas {
+                    WorkspaceModeSwitcher(mode: Binding(
+                        get: { store.doc.ui.workspaceMode },
+                        set: { store.doc.ui.workspaceMode = $0 }
+                    ))
+                    .padding(10)
+                    .zIndex(30)
+                }
             }
             .background(Color(NSColor.windowBackgroundColor))
             .background(
-                KeyCommandCatcher(onReturn: {
-                    handleReturnKey()
-                }, onCopy: {
-                    store.copySelectedImagesToPasteboard()
-                }, onPaste: {
-                    store.pasteFromPasteboard()
-                }, onUndo: {
-                    return store.undo()
-                }, onRedo: {
-                    return store.redo()
-                }, onType: { text in
-                    guard activeTextEdit == nil, store.selection.isEmpty else { return false }
-                    chatInput.append(text)
-                    ChatInputFocusBridge.shared.requestFocus(moveCaretToEnd: true)
-                    return true
-                })
+                KeyCommandCatcher(
+                    onReturn: { handleReturnKey() },
+                    onCopy: { store.copySelectedImagesToPasteboard() },
+                    onPaste: { store.pasteFromPasteboard() },
+                    onUndo: { store.undo() },
+                    onRedo: { store.redo() },
+                    onType: { text in
+                        guard activeTextEdit == nil, store.selection.isEmpty else { return false }
+                        chatInput.append(text)
+                        ChatInputFocusBridge.shared.requestFocus(moveCaretToEnd: true)
+                        return true
+                    }
+                )
             )
             .onAppear { store.viewportSize = geo.size }
-            .onChange(of: geo.size) { store.viewportSize = $0 }
+            .onChange(of: geo.size) { newSize in store.viewportSize = newSize }
             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                 handleDrop(providers: providers, geometry: geo)
             }
         }
         .coordinateSpace(name: "MainViewSpace")
         .onPreferenceChange(ToolPaletteFrameKey.self) { toolPaletteFrame = $0 }
+        .onPreferenceChange(ToolPaletteSizeKey.self) { toolPaletteSize = $0 }
         .simultaneousGesture(
             SpatialTapGesture(coordinateSpace: .named("MainViewSpace"))
                 .onEnded { value in
@@ -257,18 +438,75 @@ struct MainView: View {
             }
         }
         .onChange(of: activeTextEdit) { newValue in
-            // When text editing ends, delete if empty
             if let previousActive = previousActiveTextEdit, newValue != previousActive {
                 if let entry = store.doc.entries[previousActive],
-                   entry.type == .text,
-                   case .text(let text) = entry.data,
-                   text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                entry.type == .text,
+                case .text(let text) = entry.data,
+                text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     store.deleteEntry(id: previousActive)
                 }
             }
             previousActiveTextEdit = newValue
         }
+        .sheet(isPresented: $showingCameraCapture, onDismiss: handleCameraCancel) {
+            CameraCaptureSheet(
+                onCapture: { data in handleCameraCapture(data) },
+                onCancel: { handleCameraCancel() }
+            )
+        }
+        .onChange(of: store.doc.pendingClarification?.createdAt) { _ in
+            guard let pending = store.doc.pendingClarification else { return }
+            guard pending.question.contains("[[REQUEST_CAMERA]]") else { return }
+
+            let originalText = pending.originalText
+            store.doc.pendingClarification = nil
+            beginCameraCapture(for: originalText, voiceInput: false)
+        }
     }
+
+    @ViewBuilder
+        private var workspaceLayer: some View {
+            if store.doc.ui.workspaceMode == .canvas {
+                BoardGridView()
+                BoardWorldView(activeTextEdit: $activeTextEdit)
+            } else {
+                NotesWorkspaceView()
+            }
+        }
+
+       @ViewBuilder
+        private func toolPaletteOverlay(in geo: GeometryProxy) -> some View {
+            if store.doc.ui.workspaceMode == .canvas, store.isToolMenuVisible {
+                let fallbackSize = CGSize(width: 420, height: 64)
+                let menuSize = (toolPaletteSize == .zero) ? fallbackSize : toolPaletteSize
+                let raw = store.toolMenuScreenPosition
+                let padding: CGFloat = 8
+                let offsetFromCursor: CGFloat = 12
+
+                let x = min(max(raw.x + offsetFromCursor, padding),
+                            geo.size.width - menuSize.width - padding)
+                let y = min(max(raw.y + offsetFromCursor, padding),
+                            geo.size.height - menuSize.height - padding)
+
+                ToolPaletteView()
+                    .position(x: x + menuSize.width / 2, y: y + menuSize.height / 2)
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(
+                                key: ToolPaletteFrameKey.self,
+                                value: proxy.frame(in: .named("MainViewSpace"))
+                            )
+                        }
+                    )
+                    .background(
+                        GeometryReader { proxy in
+                            Color.clear.preference(key: ToolPaletteSizeKey.self, value: proxy.size)
+                        }
+                    )
+                    .zIndex(15)
+                    .transition(.opacity)
+            }
+        }
 
     private func handleDrop(providers: [NSItemProvider], geometry: GeometryProxy) -> Bool {
         for provider in providers {
@@ -300,13 +538,22 @@ struct MainView: View {
         submitChat()
     }
 
-    private func submitChat() {
+    private func submitChat(voiceInput: Bool = false) {
         let trimmed = chatInput.trimmingCharacters(in: .whitespacesAndNewlines)
         let imageAttachments = store.chatDraftImages
         let fileAttachments = store.chatDraftFiles
         if !trimmed.isEmpty || !imageAttachments.isEmpty || !fileAttachments.isEmpty {
+            if shouldTriggerCameraCapture(for: trimmed,
+                                          imageAttachments: imageAttachments,
+                                          fileAttachments: fileAttachments) {
+                beginCameraCapture(for: chatInput, voiceInput: voiceInput)
+                return
+            }
             let text = chatInput
-            let didSend = store.sendChat(text: text, images: imageAttachments, files: fileAttachments)
+            let didSend = store.sendChat(text: text,
+                                         images: imageAttachments,
+                                         files: fileAttachments,
+                                         voiceInput: voiceInput)
             if didSend {
                 chatInput = ""
                 store.clearChatDraftImages()
@@ -318,6 +565,154 @@ struct MainView: View {
         } else {
             chatInput = ""
         }
+    }
+
+    private func shouldTriggerCameraCapture(for text: String,
+                                            imageAttachments: [ImageRef],
+                                            fileAttachments: [FileRef]) -> Bool {
+        guard store.doc.pendingClarification == nil else { return false }
+        guard imageAttachments.isEmpty, fileAttachments.isEmpty else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let normalized = normalizedCameraPrompt(trimmed)
+        guard !normalized.isEmpty else { return false }
+
+        let exactTriggers: Set<String> = [
+            "look at this",
+            "look at that",
+            "what is this",
+            "whats this",
+            "what is that",
+            "whats that",
+            "what am i looking at",
+            "what am i seeing",
+            "do you see this",
+            "do you see that",
+            "can you see this",
+            "can you see that",
+            "identify this",
+            "identify that",
+            "check this out",
+            "tell me what this is",
+            "any idea what this is",
+            "what do you see",
+            "what do you see here"
+        ]
+        if exactTriggers.contains(normalized) {
+            return true
+        }
+
+        let prefixTriggers = [
+            "what is this",
+            "whats this",
+            "what is that",
+            "whats that",
+            "look at this",
+            "look at that"
+        ]
+        let wordCount = normalized.split(separator: " ").count
+        if wordCount <= 6, prefixTriggers.contains(where: { normalized.hasPrefix($0) }) {
+            return true
+        }
+
+        return false
+    }
+
+    private func normalizedCameraPrompt(_ text: String) -> String {
+        var normalized = text.lowercased()
+        normalized = normalized.replacingOccurrences(of: "'", with: "")
+        normalized = normalized.replacingOccurrences(of: "[^a-z0-9\\s]", with: " ",
+                                                     options: .regularExpression)
+        normalized = normalized.replacingOccurrences(of: "\\s+", with: " ",
+                                                     options: .regularExpression)
+        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func beginCameraCapture(for text: String, voiceInput: Bool) {
+        guard pendingCameraMessage == nil else { return }
+        guard AVCaptureDevice.default(for: .video) != nil else {
+            store.chatWarning = "Camera not available on this device."
+            if voiceInput {
+                store.endVoiceConversation()
+            }
+            return
+        }
+
+        pendingCameraMessage = text
+        pendingCameraVoiceInput = voiceInput
+        store.chatWarning = nil
+
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        switch status {
+        case .authorized:
+            showingCameraCapture = true
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        showingCameraCapture = true
+                    } else {
+                        let shouldEndVoice = pendingCameraVoiceInput
+                        pendingCameraMessage = nil
+                        pendingCameraVoiceInput = false
+                        store.chatWarning = "Camera access denied. Enable it in Settings to use visual questions."
+                        if shouldEndVoice {
+                            store.endVoiceConversation()
+                        }
+                    }
+                }
+            }
+        case .denied, .restricted:
+            pendingCameraMessage = nil
+            pendingCameraVoiceInput = false
+            store.chatWarning = "Camera access denied. Enable it in Settings to use visual questions."
+            if voiceInput {
+                store.endVoiceConversation()
+            }
+        @unknown default:
+            pendingCameraMessage = nil
+            pendingCameraVoiceInput = false
+            store.chatWarning = "Camera access unavailable."
+            if voiceInput {
+                store.endVoiceConversation()
+            }
+        }
+    }
+
+    private func handleCameraCapture(_ data: Data) {
+        showingCameraCapture = false
+        guard let text = pendingCameraMessage else { return }
+        let voiceInput = pendingCameraVoiceInput
+        pendingCameraMessage = nil
+        pendingCameraVoiceInput = false
+
+        guard let ref = store.saveImage(data: data, ext: "jpg") else {
+            store.chatWarning = "Failed to save the camera image."
+            if voiceInput {
+                store.endVoiceConversation()
+            }
+            return
+        }
+
+        let didSend = store.sendChat(text: text,
+                                     images: [ref],
+                                     files: [],
+                                     voiceInput: voiceInput)
+        if didSend {
+            chatInput = ""
+            store.clearChatDraftImages()
+            store.clearChatDraftFiles()
+        }
+    }
+
+    private func handleCameraCancel() {
+        guard pendingCameraMessage != nil else { return }
+        showingCameraCapture = false
+        pendingCameraMessage = nil
+        if pendingCameraVoiceInput {
+            store.endVoiceConversation()
+        }
+        pendingCameraVoiceInput = false
     }
 
 }
@@ -552,27 +947,180 @@ struct PastingChatTextView: NSViewRepresentable {
     }
 }
 
-enum LoginItemManager {
-    static func setEnabled(_ enabled: Bool) {
-        if #available(macOS 13.0, *) {
-            do {
-                if enabled {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
+private struct CameraCaptureSheet: View {
+    @StateObject private var model: CameraCaptureModel
+    let onCapture: (Data) -> Void
+    let onCancel: () -> Void
+
+    init(onCapture: @escaping (Data) -> Void, onCancel: @escaping () -> Void) {
+        self.onCapture = onCapture
+        self.onCancel = onCancel
+        _model = StateObject(wrappedValue: CameraCaptureModel(onCapture: onCapture))
+    }
+
+    var body: some View {
+        ZStack {
+            if let msg = model.errorMessage {
+                VStack(spacing: 12) {
+                    Text(msg).font(.headline)
+                    Button("Close") { onCancel() }
                 }
-            } catch {
-                print("Launch at login error:", error)
+                .padding(20)
+            } else {
+                CameraPreviewView(session: model.session)
+                    .ignoresSafeArea()
             }
-        } else {
-            // For macOS 12 and earlier you'd need the older helper-app approach.
-            // If you’re on Ventura/Sonoma+ you can ignore this.
+
+            VStack {
+                HStack {
+                    Button("Cancel") {
+                        model.stop()
+                        onCancel()
+                    }
+                    .padding(12)
+
+                    Spacer()
+                }
+
+                Spacer()
+
+                Button {
+                    model.capturePhoto()
+                } label: {
+                    Image(systemName: "circle.inset.filled")
+                        .font(.system(size: 56, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .padding(.bottom, 18)
+            }
         }
+        .onAppear { model.start() }
+        .onDisappear { model.stop() }
+        .frame(minWidth: 700, minHeight: 520)
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+private final class CameraCaptureModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
+    let session = AVCaptureSession()
+    @Published var errorMessage: String?
+
+    private let output = AVCapturePhotoOutput()
+    private let onCapture: (Data) -> Void
+    private var isConfigured = false
+
+    init(onCapture: @escaping (Data) -> Void) {
+        self.onCapture = onCapture
+    }
+
+    func start() {
+        configureSessionIfNeeded()
+        guard errorMessage == nil else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, !self.session.isRunning else { return }
+            self.session.startRunning()
+        }
+    }
+
+    func stop() {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+        }
+    }
+
+    func capturePhoto() {
+        guard errorMessage == nil else { return }
+        let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+        output.capturePhoto(with: settings, delegate: self)
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput,
+                     didFinishProcessingPhoto photo: AVCapturePhoto,
+                     error: Error?) {
+        if let error {
+            DispatchQueue.main.async {
+                self.errorMessage = "Capture failed: \(error.localizedDescription)"
+            }
+            return
+        }
+        guard let data = photo.fileDataRepresentation() else {
+            DispatchQueue.main.async {
+                self.errorMessage = "Unable to read the captured photo."
+            }
+            return
+        }
+        DispatchQueue.main.async {
+            self.onCapture(data)
+        }
+    }
+
+    private func configureSessionIfNeeded() {
+        guard !isConfigured else { return }
+        isConfigured = true
+        session.beginConfiguration()
+        session.sessionPreset = .photo
+
+        defer { session.commitConfiguration() }
+
+        guard let device = AVCaptureDevice.default(for: .video) else {
+            errorMessage = "No camera available."
+            return
+        }
+
+        do {
+            let input = try AVCaptureDeviceInput(device: device)
+            guard session.canAddInput(input) else {
+                errorMessage = "Camera input unavailable."
+                return
+            }
+            session.addInput(input)
+        } catch {
+            errorMessage = "Unable to access the camera."
+            return
+        }
+
+        guard session.canAddOutput(output) else {
+            errorMessage = "Camera output unavailable."
+            return
+        }
+        session.addOutput(output)
+    }
+}
+
+private struct CameraPreviewView: NSViewRepresentable {
+    let session: AVCaptureSession
+
+    func makeNSView(context: Context) -> CameraPreviewContainer {
+        CameraPreviewContainer(session: session)
+    }
+
+    func updateNSView(_ nsView: CameraPreviewContainer, context: Context) {
+        nsView.updateSession(session)
+    }
+}
+
+private final class CameraPreviewContainer: NSView {
+    private let previewLayer: AVCaptureVideoPreviewLayer
+
+    init(session: AVCaptureSession) {
+        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.videoGravity = .resizeAspectFill
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer = previewLayer
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func updateSession(_ session: AVCaptureSession) {
+        previewLayer.session = session
+    }
+
+    override func layout() {
+        super.layout()
+        previewLayer.frame = bounds
     }
 }
