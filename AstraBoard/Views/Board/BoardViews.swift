@@ -1068,6 +1068,11 @@ struct NotesSidebarTree: View {
     @State private var expandedNotebooks: Set<UUID> = []
     @State private var expandedSections: Set<UUID> = []
 
+    // Search UI state
+    @State private var isShowingSearch: Bool = false
+    @State private var searchQuery: String = ""
+    @State private var searchResults: [NoteSearchResult] = []
+
     // Drag payload is a plain string so we can use UTType.plainText everywhere.
     // Format: fromStack|fromNotebook(optional)|fromSection(optional)|noteID
     private func makeDragString(stackID: UUID, notebookID: UUID?, sectionID: UUID?, noteID: UUID) -> String {
@@ -1347,6 +1352,9 @@ struct NotesSidebarTree: View {
             // Apple Notes vibe: stacks shown, but not necessarily expanded.
             // If you want them expanded by default, uncomment:
             // expandedStacks = Set(store.doc.notes.stacks.map(\.id))
+            if !searchQuery.isEmpty {
+                performSearch()
+            }
         }
     }
 
@@ -1360,6 +1368,28 @@ struct NotesSidebarTree: View {
             ))
 
             Spacer()
+
+            Button {
+                isShowingSearch.toggle()
+                if isShowingSearch {
+                    performSearch()
+                }
+            } label: {
+                Image(systemName: "magnifyingglass")
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isShowingSearch, arrowEdge: .bottom) {
+                NotesSearchView(
+                    query: $searchQuery,
+                    results: searchResults,
+                    onSubmit: { performSearch() },
+                    onSelect: { result in
+                        selectNoteByID(result.noteID)
+                        isShowingSearch = false
+                    }
+                )
+                .environmentObject(store)
+            }
 
             Menu {
                 Button("Add Stack") { store.addStack() }
@@ -1420,9 +1450,9 @@ struct NotesSidebarTree: View {
     private func isSelected(stack: UUID?, notebook: UUID?, section: UUID?, note: UUID?) -> Bool {
         let sel = store.doc.notes.selection
         return sel.stackID == stack &&
-               sel.notebookID == notebook &&
-               sel.sectionID == section &&
-               sel.noteID == note
+            sel.notebookID == notebook &&
+            sel.sectionID == section &&
+            sel.noteID == note
     }
 
     private func selectNote(stackID: UUID, notebookID: UUID, sectionID: UUID?, noteID: UUID) {
@@ -1444,6 +1474,31 @@ struct NotesSidebarTree: View {
         expandedStacks.insert(stackID)
     }
 
+    /// Selects a note anywhere in the workspace and ensures its containers are expanded.
+    private func selectNoteByID(_ noteID: UUID) {
+        for stack in store.doc.notes.stacks {
+            // Stack-level note
+            if stack.notes.contains(where: { $0.id == noteID }) {
+                selectStackNote(stackID: stack.id, noteID: noteID)
+                return
+            }
+
+            // Notebook + section notes
+            for notebook in stack.notebooks {
+                if notebook.notes.contains(where: { $0.id == noteID }) {
+                    selectNote(stackID: stack.id, notebookID: notebook.id, sectionID: nil, noteID: noteID)
+                    return
+                }
+                for section in notebook.sections {
+                    if section.notes.contains(where: { $0.id == noteID }) {
+                        selectNote(stackID: stack.id, notebookID: notebook.id, sectionID: section.id, noteID: noteID)
+                        return
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: Counts
 
     private func notebookNoteCount(_ nb: NoteNotebook) -> Int {
@@ -1452,6 +1507,92 @@ struct NotesSidebarTree: View {
 
     private func stackNoteCount(_ stack: NoteStack) -> Int {
         stack.notes.count + stack.notebooks.reduce(0) { $0 + notebookNoteCount($1) }
+    }
+
+    // MARK: Search helpers
+
+    private func performSearch() {
+        let trimmed = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            searchResults = []
+            return
+        }
+
+        let queryLower = trimmed.lowercased()
+        var results: [NoteSearchResult] = []
+
+        for stack in store.doc.notes.stacks {
+            let stackPath = "Stack: \(stack.title)"
+
+            // Stack-level notes
+            for note in stack.notes {
+                if let hit = score(note: note, path: stackPath, queryLower: queryLower, queryOriginal: trimmed) {
+                    results.append(hit)
+                }
+            }
+
+            // Notebook + section notes
+            for notebook in stack.notebooks {
+                let notebookPath = "\(stackPath) > Notebook: \(notebook.title)"
+
+                for note in notebook.notes {
+                    if let hit = score(note: note, path: notebookPath, queryLower: queryLower, queryOriginal: trimmed) {
+                        results.append(hit)
+                    }
+                }
+
+                for section in notebook.sections {
+                    let sectionPath = "\(notebookPath) > Section: \(section.title)"
+                    for note in section.notes {
+                        if let hit = score(note: note, path: sectionPath, queryLower: queryLower, queryOriginal: trimmed) {
+                            results.append(hit)
+                        }
+                    }
+                }
+            }
+        }
+
+        results.sort { $0.score > $1.score }
+        searchResults = Array(results.prefix(50))
+    }
+
+    private func score(note: NoteItem, path: String, queryLower: String, queryOriginal: String) -> NoteSearchResult? {
+        let titleLower = note.displayTitle.lowercased()
+        let bodyLower = note.body.lowercased()
+        let pathLower = path.lowercased()
+
+        var score = 0
+        if titleLower.contains(queryLower) { score += 10 }
+        if pathLower.contains(queryLower) { score += 3 }
+        if bodyLower.contains(queryLower) { score += 1 }
+
+        guard score > 0 else { return nil }
+
+        let body = note.body
+        let snippet: String
+        if let range = body.range(of: queryOriginal, options: .caseInsensitive) {
+            let startOffset = body.distance(from: body.startIndex, to: range.lowerBound)
+            let endOffset = body.distance(from: body.startIndex, to: range.upperBound)
+            let window = 40
+            let start = max(0, startOffset - window)
+            let end = min(body.count, endOffset + window)
+            let startIndex = body.index(body.startIndex, offsetBy: start)
+            let endIndex = body.index(body.startIndex, offsetBy: end)
+            let slice = body[startIndex..<endIndex]
+            snippet = (start > 0 ? "…" : "") + slice + (end < body.count ? "…" : "")
+        } else {
+            snippet = String(body.prefix(80))
+        }
+
+        let title = note.displayTitle.isEmpty ? "Untitled" : note.displayTitle
+
+        return NoteSearchResult(
+            noteID: note.id,
+            title: title,
+            snippet: snippet,
+            path: path,
+            score: score
+        )
     }
 
     // MARK: Expand toggle
@@ -1495,5 +1636,66 @@ struct NotesSidebarTree: View {
 
     private func createQuickNote() {
         store.addQuickNote()
+    }
+}
+
+// MARK: - Notes search popover
+
+fileprivate struct NoteSearchResult: Identifiable {
+    let noteID: UUID
+    let title: String
+    let snippet: String
+    let path: String
+    let score: Int
+
+    var id: UUID { noteID }
+}
+
+private struct NotesSearchView: View {
+    @EnvironmentObject var store: BoardStore
+
+    @Binding var query: String
+    var results: [NoteSearchResult]
+    var onSubmit: () -> Void
+    var onSelect: (NoteSearchResult) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("Search notes", text: $query, onCommit: onSubmit)
+                .textFieldStyle(RoundedBorderTextFieldStyle())
+
+            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("Type to search across all stacks, notebooks, sections, and notes.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Spacer()
+            } else if results.isEmpty {
+                Text("No matching notes.")
+                    .foregroundColor(.secondary)
+                Spacer()
+            } else {
+                List(results) { hit in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(hit.title)
+                            .font(.headline)
+                        Text(hit.snippet)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                            .lineLimit(2)
+                        Text(hit.path)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onSelect(hit)
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 320, idealWidth: 360, maxWidth: 420,
+               minHeight: 220, idealHeight: 320, maxHeight: 420)
     }
 }
