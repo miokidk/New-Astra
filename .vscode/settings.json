@@ -1,3 +1,5 @@
 {
-    "chatgpt.openOnStartup": true
+    "chatgpt.openOnStartup": true,
+    "workbench.preferredLightColorTheme": "Cursor Light",
+    "window.autoDetectColorScheme": true
 }

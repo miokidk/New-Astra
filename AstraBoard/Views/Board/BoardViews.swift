@@ -1661,8 +1661,11 @@ private struct NotesSearchView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Search notes", text: $query, onCommit: onSubmit)
+            TextField("Search notes", text: $query)
                 .textFieldStyle(RoundedBorderTextFieldStyle())
+                .onChange(of: query) { _ in
+                    onSubmit()
+                }
 
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("Type to search across all stacks, notebooks, sections, and notes.")
