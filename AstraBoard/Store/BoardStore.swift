@@ -67,6 +67,7 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     }
     @Published var editingEntryID: UUID?
     @Published var currentTool: BoardTool = .select
+    @Published var pendingShapeKind: ShapeKind = .rect
     // MARK: - Context Tool Menu (popup tool palette)
     @Published var isToolMenuVisible: Bool = false
     @Published var toolMenuScreenPosition: CGPoint = .zero
@@ -1913,6 +1914,20 @@ extension BoardStore {
         touch()
         addLog("Created \(String(describing: type)) entry", related: [entry.id])
         return entry.id
+    }
+
+    func updateShapeKind(id: UUID, kind: ShapeKind, recordUndo: Bool = true) {
+        guard var entry = doc.entries[id] else { return }
+        guard case .shape = entry.data else { return }
+
+        if recordUndo {
+            recordUndoSnapshot(coalescingKey: "resize-\(id.uuidString)")
+        }
+
+        entry.data = .shape(kind)
+        entry.updatedAt = Date().timeIntervalSince1970
+        doc.entries[id] = entry
+        touch()
     }
 
     func updateEntryFrame(id: UUID, rect: CGRect, recordUndo: Bool = true) {
@@ -9481,7 +9496,13 @@ extension BoardStore {
 
     private func entryContainsPoint(_ entry: BoardEntry, worldPoint: CGPoint) -> Bool {
         let rect = CGRect(x: entry.x.cg, y: entry.y.cg, width: entry.w.cg, height: entry.h.cg)
-        if case .shape(let kind) = entry.data, kind == .circle {
+
+        guard case .shape(let kind) = entry.data else {
+            return rect.contains(worldPoint)
+        }
+
+        switch kind {
+        case .circle:
             let rx = rect.width / 2
             let ry = rect.height / 2
             guard rx > 0, ry > 0 else { return false }
@@ -9489,8 +9510,58 @@ extension BoardStore {
             let dx = (worldPoint.x - center.x) / rx
             let dy = (worldPoint.y - center.y) / ry
             return (dx * dx + dy * dy) <= 1.0
+
+        case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+            let (a, b, c) = triangleVertices(kind: kind, in: rect)
+            return pointInTriangle(worldPoint, a, b, c)
+
+        case .rect:
+            return rect.contains(worldPoint)
         }
-        return rect.contains(worldPoint)
+    }
+
+    private func triangleVertices(kind: ShapeKind, in rect: CGRect) -> (CGPoint, CGPoint, CGPoint) {
+        let minX = rect.minX, midX = rect.midX, maxX = rect.maxX
+        let minY = rect.minY, midY = rect.midY, maxY = rect.maxY
+
+        switch kind {
+        case .triangleUp:
+            return (CGPoint(x: midX, y: minY),
+                    CGPoint(x: maxX, y: maxY),
+                    CGPoint(x: minX, y: maxY))
+        case .triangleDown:
+            return (CGPoint(x: midX, y: maxY),
+                    CGPoint(x: minX, y: minY),
+                    CGPoint(x: maxX, y: minY))
+        case .triangleLeft:
+            return (CGPoint(x: minX, y: midY),
+                    CGPoint(x: maxX, y: minY),
+                    CGPoint(x: maxX, y: maxY))
+        case .triangleRight:
+            return (CGPoint(x: maxX, y: midY),
+                    CGPoint(x: minX, y: minY),
+                    CGPoint(x: minX, y: maxY))
+        default:
+            // Not used here
+            return (CGPoint(x: rect.minX, y: rect.minY),
+                    CGPoint(x: rect.maxX, y: rect.minY),
+                    CGPoint(x: rect.minX, y: rect.maxY))
+        }
+    }
+
+    private func pointInTriangle(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> Bool {
+        func sign(_ p1: CGPoint, _ p2: CGPoint, _ p3: CGPoint) -> CGFloat {
+            (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+        }
+
+        let d1 = sign(p, a, b)
+        let d2 = sign(p, b, c)
+        let d3 = sign(p, c, a)
+
+        let hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0)
+        let hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0)
+
+        return !(hasNeg && hasPos)
     }
 }
 

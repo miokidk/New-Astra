@@ -539,6 +539,24 @@ struct BoardWorldView: View {
                     .simultaneousGesture(magnificationGesture())
                     .simultaneousGesture(tapGesture())
                     .simultaneousGesture(clickGesture())
+                    .background(
+                        RightClickCaptureView { screenPoint in
+                            guard !store.isDraggingOverlay else { return }
+                            store.notePointerLocation(screenPoint)
+
+                            // Only show the tool palette on empty-board secondary click, while in Select tool.
+                            guard store.currentTool == .select else { return }
+                            guard store.topEntryAtScreenPoint(screenPoint) == nil else { return }
+
+                            store.selection.removeAll()
+                            activeTextEdit = nil
+
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                store.showToolMenu(at: screenPoint)
+                            }
+                        }
+                        .allowsHitTesting(false)
+                    )
 
                 ForEach(store.doc.zOrder, id: \.self) { id in
                     if let entry = store.doc.entries[id] {
@@ -555,7 +573,8 @@ struct BoardWorldView: View {
                                       height: marquee.size.height * zoom)
                     let center = screenPoint(for: marquee.origin + CGSize(width: marquee.width / 2,
                                                                           height: marquee.height / 2))
-                    if store.currentTool == .circle {
+                    let isCirclePreview = store.currentTool == .circle || (store.currentTool == .rect && store.pendingShapeKind == .circle)
+                    if isCirclePreview {
                         Circle()
                             .stroke(Color.accentColor.opacity(0.6), style: StrokeStyle(lineWidth: 1, dash: [6, 4]))
                             .background(Circle().fill(Color.accentColor.opacity(0.1)))
@@ -637,14 +656,11 @@ struct BoardWorldView: View {
                     store.selection = [hit]
                     withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
                 } else {
+                    // Left click empty board should NOT open the palette anymore.
+                    store.selection.removeAll()
+                    activeTextEdit = nil
                     if store.isToolMenuVisible {
-                        withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
-                    } else {
-                        store.selection.removeAll()
-                        activeTextEdit = nil
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            store.showToolMenu(at: screenPoint)
-                        }
+                        withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu(suppressNextShow: false) }
                     }
                 }
 
@@ -658,7 +674,7 @@ struct BoardWorldView: View {
 
             case .rect:
                 withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
-                placeShape(kind: .rect, at: worldPoint(from: screenPoint))
+                placeShape(kind: store.pendingShapeKind, at: worldPoint(from: screenPoint))
 
             case .circle:
                 withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
@@ -772,7 +788,7 @@ struct BoardWorldView: View {
 
                     case .rect:
                         withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
-                        placeShape(kind: .rect, at: worldPoint(from: screenPoint))
+                        placeShape(kind: store.pendingShapeKind, at: worldPoint(from: screenPoint))
 
                     case .circle:
                         withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
@@ -792,7 +808,9 @@ struct BoardWorldView: View {
                 let current = worldPoint(from: value.location)
                 marqueeStart = start
                 let rect = CGRect(origin: start, size: .zero).union(CGRect(origin: current, size: .zero))
-                let marqueeRect = store.currentTool == .circle
+                let isCircleMarquee = store.currentTool == .circle || (store.currentTool == .rect && store.pendingShapeKind == .circle)
+
+                let marqueeRect = isCircleMarquee
                     ? squareRect(from: start, to: current)
                     : rect
                 switch store.currentTool {
@@ -815,9 +833,12 @@ struct BoardWorldView: View {
                     let rect = CGRect(origin: start, size: .zero).union(CGRect(origin: end, size: .zero))
                     selectEntries(in: rect)
                 case .rect:
-                    let rect = CGRect(origin: start, size: .zero).union(CGRect(origin: end, size: .zero))
-                    let kind: ShapeKind = .rect
-                    let id = store.createEntry(type: .shape, frame: rect, data: .shape(kind))
+                    let baseRect = CGRect(origin: start, size: .zero).union(CGRect(origin: end, size: .zero))
+
+                    let kind = store.pendingShapeKind
+                    let frame = (kind == .circle) ? squareRect(from: start, to: end) : baseRect
+
+                    let id = store.createEntry(type: .shape, frame: frame, data: .shape(kind))
                     store.selection = [id]
                     store.currentTool = .select
                 case .circle:
@@ -894,8 +915,12 @@ struct BoardWorldView: View {
         switch kind {
         case .rect:
             rect = CGRect(x: point.x - 120, y: point.y - 80, width: 240, height: 160)
+
         case .circle:
             rect = CGRect(x: point.x - 100, y: point.y - 100, width: 200, height: 200)
+
+        case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+            rect = CGRect(x: point.x - 120, y: point.y - 80, width: 240, height: 160)
         }
         let id = store.createEntry(type: .shape, frame: rect, data: .shape(kind))
         store.selection = [id]
@@ -1057,6 +1082,56 @@ struct ScrollZoomView: NSViewRepresentable {
                 onScroll?(event.scrollingDeltaX, event.scrollingDeltaY, location, event.modifierFlags)
             }
         }
+}
+
+struct RightClickCaptureView: NSViewRepresentable {
+    var onSecondaryClick: (CGPoint) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = CaptureView()
+        view.onSecondaryClick = onSecondaryClick
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? CaptureView)?.onSecondaryClick = onSecondaryClick
+    }
+
+    private final class CaptureView: NSView {
+        var onSecondaryClick: ((CGPoint) -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            guard let window else { monitor = nil; return }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+                guard let self, let win = self.window, event.window === win else { return event }
+
+                // Treat right-click OR control-click as "secondary click"
+                let isSecondary =
+                    event.type == .rightMouseDown ||
+                    (event.type == .leftMouseDown && event.modifierFlags.contains(.control))
+
+                guard isSecondary else { return event }
+
+                guard let contentView = win.contentView else { return event }
+
+                let p = event.locationInWindow
+                let location = CGPoint(x: p.x, y: contentView.bounds.height - p.y) // flip Y into SwiftUI space
+                self.onSecondaryClick?(location)
+
+                // Don't consume — allow entry context menus to work normally.
+                return event
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+    }
 }
 
 struct NotesSidebarTree: View {

@@ -427,7 +427,7 @@ struct MainView: View {
                     guard store.isToolMenuVisible else { return }
                     if toolPaletteFrame.contains(value.location) { return }
                     withAnimation(.easeOut(duration: 0.12)) {
-                        store.hideToolMenu(suppressNextShow: true)
+                        store.hideToolMenu(suppressNextShow: false)
                     }
                 }
         )

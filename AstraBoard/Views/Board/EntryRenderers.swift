@@ -23,7 +23,7 @@ struct EntryContainerView: View {
             EntryContentView(entry: entry, activeTextEdit: $activeTextEdit)
                 .frame(width: rect.width, height: rect.height)
                 // Hit-testing + drag belongs to the entry content ONLY
-                .modifier(EntryHitShape(isCircle: isCircleEntry(entry)))
+                .modifier(EntryHitShape(shapeKind: shapeKind(for: entry)))
                 .gesture(entryDrag(), including: .gesture)
 
             // Handles are separate siblings so they can receive drags
@@ -166,21 +166,22 @@ struct EntryContainerView: View {
         return CGRect(origin: origin, size: size)
     }
 
-    private func isCircleEntry(_ entry: BoardEntry) -> Bool {
-        if case .shape(let kind) = entry.data {
-            return kind == .circle
-        }
-        return false
+    private func shapeKind(for entry: BoardEntry) -> ShapeKind? {
+        if case .shape(let kind) = entry.data { return kind }
+        return nil
     }
 
     @ViewBuilder
     private func selectionOutlineView(color: Color, lineWidth: CGFloat) -> some View {
         switch entry.data {
         case .shape(let kind):
-            if kind == .circle {
+            switch kind {
+            case .circle:
                 outsideStrokeCircle(lineWidth: lineWidth, color: color)
-            } else {
+            case .rect:
                 outsideStrokeRoundedRect(cornerRadius: 8, lineWidth: lineWidth, color: color)
+            case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+                outsideStrokeTriangle(kind: kind, lineWidth: lineWidth, color: color)
             }
         case .text:
             outsideStrokeRoundedRect(cornerRadius: 12, lineWidth: lineWidth, color: color)
@@ -288,17 +289,24 @@ struct EntryContentView: View {
                 let fill = style.fillColor.color.opacity(style.fillOpacity)
                 let stroke = style.borderColor.color.opacity(style.borderOpacity)
                 let lineWidth = max(style.borderWidth, 0) * zoom
-                if kind == .rect {
+                switch kind {
+                case .rect:
                     let cornerRadius: CGFloat = 8
                     RoundedRectangle(cornerRadius: cornerRadius)
                         .fill(fill)
                         .overlay(outsideStrokeRoundedRect(cornerRadius: cornerRadius,
-                                                          lineWidth: lineWidth,
-                                                          color: stroke))
-                } else {
+                                                        lineWidth: lineWidth,
+                                                        color: stroke))
+
+                case .circle:
                     Circle()
                         .fill(fill)
                         .overlay(outsideStrokeCircle(lineWidth: lineWidth, color: stroke))
+
+                case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+                    TriangleShape(kind: kind)
+                        .fill(fill)
+                        .overlay(outsideStrokeTriangle(kind: kind, lineWidth: lineWidth, color: stroke))
                 }
             case .line(let data):
                 let zoom = store.doc.viewport.zoom.cg
@@ -512,6 +520,58 @@ private extension ColorComponents {
     }
 }
 
+private struct TriangleShape: InsettableShape {
+    let kind: ShapeKind
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+
+        let minX = r.minX, midX = r.midX, maxX = r.maxX
+        let minY = r.minY, midY = r.midY, maxY = r.maxY
+
+        var p = Path()
+        switch kind {
+        case .triangleUp:
+            p.move(to: CGPoint(x: midX, y: minY))
+            p.addLine(to: CGPoint(x: maxX, y: maxY))
+            p.addLine(to: CGPoint(x: minX, y: maxY))
+        case .triangleDown:
+            p.move(to: CGPoint(x: midX, y: maxY))
+            p.addLine(to: CGPoint(x: minX, y: minY))
+            p.addLine(to: CGPoint(x: maxX, y: minY))
+        case .triangleLeft:
+            p.move(to: CGPoint(x: minX, y: midY))
+            p.addLine(to: CGPoint(x: maxX, y: minY))
+            p.addLine(to: CGPoint(x: maxX, y: maxY))
+        case .triangleRight:
+            p.move(to: CGPoint(x: maxX, y: midY))
+            p.addLine(to: CGPoint(x: minX, y: minY))
+            p.addLine(to: CGPoint(x: minX, y: maxY))
+        case .rect, .circle:
+            // Not used for these kinds
+            p.addRect(r)
+        }
+        p.closeSubpath()
+        return p
+    }
+
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
+@ViewBuilder
+private func outsideStrokeTriangle(kind: ShapeKind, lineWidth: CGFloat, color: Color) -> some View {
+    if lineWidth > 0 {
+        TriangleShape(kind: kind)
+            .inset(by: -lineWidth / 2)
+            .stroke(color, lineWidth: lineWidth)
+    }
+}
+
 struct LineEntryShape: Shape {
     var data: LineData
     var entry: BoardEntry
@@ -554,6 +614,7 @@ private struct ResizeHandles: View {
     var entry: BoardEntry
     @Binding var activeTextEdit: UUID?
     @State private var resizeStartFrame: CGRect?
+    @State private var resizeStartShapeKind: ShapeKind?
     
     var body: some View {
         let zoom = store.doc.viewport.zoom.cg
@@ -684,6 +745,10 @@ private struct ResizeHandles: View {
                 if resizeStartFrame == nil {
                     resizeStartFrame = CGRect(x: currentEntry.x.cg, y: currentEntry.y.cg, width: currentEntry.w.cg, height: currentEntry.h.cg)
                 }
+
+                if resizeStartShapeKind == nil, case .shape(let k) = currentEntry.data {
+                    resizeStartShapeKind = k
+                }
                 
                 guard let startFrame = resizeStartFrame else { return }
                 let startWorld = store.worldPoint(from: value.startLocation)
@@ -702,7 +767,32 @@ private struct ResizeHandles: View {
                 }
 
                 // 1. Calculate standard rectangular resize (used for Image, Rect, Circle handles)
-                var newRect = calculateStandardResize(startFrame: startFrame, delta: delta, position: position)
+                let result = calculateStandardResize(startFrame: startFrame, delta: delta, position: position)
+                var newRect = result.rect
+
+                if let startKind = resizeStartShapeKind,
+                    case .shape(let currentKind) = currentEntry.data {
+
+                        var desired = startKind
+
+                        // Vertical pair flips when you cross vertically
+                        if startKind == .triangleUp || startKind == .triangleDown {
+                            if result.invertedY {
+                                desired = (startKind == .triangleUp) ? .triangleDown : .triangleUp
+                            }
+                        }
+
+                        // Horizontal pair flips when you cross horizontally
+                        if startKind == .triangleLeft || startKind == .triangleRight {
+                            if result.invertedX {
+                                desired = (startKind == .triangleLeft) ? .triangleRight : .triangleLeft
+                            }
+                        }
+
+                        if desired != currentKind {
+                            store.updateShapeKind(id: entry.id, kind: desired)
+                        }
+                    }
                 
                 // 2. If it's a circle, snap to 1:1 aspect to ensure the selection outline matches the shape
                 if isCircleEntry(currentEntry) {
@@ -720,6 +810,7 @@ private struct ResizeHandles: View {
             }
             .onEnded { _ in
                 resizeStartFrame = nil
+                resizeStartShapeKind = nil
             }
     }
 
@@ -753,43 +844,116 @@ private struct ResizeHandles: View {
             }
     }
     
-    private func calculateStandardResize(startFrame: CGRect, delta: CGSize, position: Edge) -> CGRect {
-        var frame = startFrame
-        let minSize: CGFloat = 10
-        
-        switch position {
-        case .top:
-            frame.origin.y += delta.height
-            frame.size.height -= delta.height
-        case .bottom:
-            frame.size.height += delta.height
-        case .left:
-            frame.origin.x += delta.width
-            frame.size.width -= delta.width
-        case .right:
-            frame.size.width += delta.width
-        case .topLeft:
-            frame.origin.x += delta.width
-            frame.origin.y += delta.height
-            frame.size.width -= delta.width
-            frame.size.height -= delta.height
-        case .topRight:
-            frame.origin.y += delta.height
-            frame.size.width += delta.width
-            frame.size.height -= delta.height
-        case .bottomLeft:
-            frame.origin.x += delta.width
-            frame.size.width -= delta.width
-            frame.size.height += delta.height
-        case .bottomRight:
-            frame.size.width += delta.width
-            frame.size.height += delta.height
+    private func calculateStandardResize(startFrame: CGRect, delta: CGSize, position: Edge) -> (rect: CGRect, invertedX: Bool, invertedY: Bool) {
+        let minSize: CGFloat = 0.01
+
+        var minX = startFrame.minX
+        var maxX = startFrame.maxX
+        var minY = startFrame.minY
+        var maxY = startFrame.maxY
+
+        var invertedX = false
+        var invertedY = false
+
+        // Helpers for one axis (anchor + moving side that can cross)
+        func solveAxis(anchor: CGFloat, moving: CGFloat, initialMovingLess: Bool) -> (min: CGFloat, max: CGFloat, inverted: Bool) {
+            let movingLess = moving < anchor
+            var lo = min(moving, anchor)
+            var hi = max(moving, anchor)
+
+            // enforce minimum size while keeping the anchor fixed
+            if (hi - lo) < minSize {
+                if movingLess {
+                    lo = anchor - minSize
+                    hi = anchor
+                } else {
+                    lo = anchor
+                    hi = anchor + minSize
+                }
+            }
+
+            return (lo, hi, movingLess != initialMovingLess)
         }
-        
-        if frame.width < minSize { frame.size.width = minSize }
-        if frame.height < minSize { frame.size.height = minSize }
-        
-        return frame
+
+        switch position {
+            case .left:
+                let anchor = startFrame.maxX
+                let moving = startFrame.minX + delta.width
+                let solved = solveAxis(anchor: anchor, moving: moving, initialMovingLess: true)
+                minX = solved.min
+                maxX = solved.max
+                invertedX = solved.inverted
+
+            case .right:
+                let anchor = startFrame.minX
+                let moving = startFrame.maxX + delta.width
+                let solved = solveAxis(anchor: anchor, moving: moving, initialMovingLess: false)
+                minX = solved.min
+                maxX = solved.max
+                invertedX = solved.inverted
+
+            case .top:
+                let anchor = startFrame.maxY
+                let moving = startFrame.minY + delta.height
+                let solved = solveAxis(anchor: anchor, moving: moving, initialMovingLess: true)
+                minY = solved.min
+                maxY = solved.max
+                invertedY = solved.inverted
+
+            case .bottom:
+                let anchor = startFrame.minY
+                let moving = startFrame.maxY + delta.height
+                let solved = solveAxis(anchor: anchor, moving: moving, initialMovingLess: false)
+                minY = solved.min
+                maxY = solved.max
+                invertedY = solved.inverted
+
+            case .topLeft:
+                let ax = startFrame.maxX
+                let mx = startFrame.minX + delta.width
+                let sx = solveAxis(anchor: ax, moving: mx, initialMovingLess: true)
+                minX = sx.min; maxX = sx.max; invertedX = sx.inverted
+
+                let ay = startFrame.maxY
+                let my = startFrame.minY + delta.height
+                let sy = solveAxis(anchor: ay, moving: my, initialMovingLess: true)
+                minY = sy.min; maxY = sy.max; invertedY = sy.inverted
+
+            case .topRight:
+                let ax = startFrame.minX
+                let mx = startFrame.maxX + delta.width
+                let sx = solveAxis(anchor: ax, moving: mx, initialMovingLess: false)
+                minX = sx.min; maxX = sx.max; invertedX = sx.inverted
+
+                let ay = startFrame.maxY
+                let my = startFrame.minY + delta.height
+                let sy = solveAxis(anchor: ay, moving: my, initialMovingLess: true)
+                minY = sy.min; maxY = sy.max; invertedY = sy.inverted
+
+            case .bottomLeft:
+                let ax = startFrame.maxX
+                let mx = startFrame.minX + delta.width
+                let sx = solveAxis(anchor: ax, moving: mx, initialMovingLess: true)
+                minX = sx.min; maxX = sx.max; invertedX = sx.inverted
+
+                let ay = startFrame.minY
+                let my = startFrame.maxY + delta.height
+                let sy = solveAxis(anchor: ay, moving: my, initialMovingLess: false)
+                minY = sy.min; maxY = sy.max; invertedY = sy.inverted
+
+            case .bottomRight:
+                let ax = startFrame.minX
+                let mx = startFrame.maxX + delta.width
+                let sx = solveAxis(anchor: ax, moving: mx, initialMovingLess: false)
+                minX = sx.min; maxX = sx.max; invertedX = sx.inverted
+
+                let ay = startFrame.minY
+                let my = startFrame.maxY + delta.height
+                let sy = solveAxis(anchor: ay, moving: my, initialMovingLess: false)
+                minY = sy.min; maxY = sy.max; invertedY = sy.inverted
+            }
+
+        return (CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY), invertedX, invertedY)
     }
 
     private func calculateHorizontalResize(startFrame: CGRect,
@@ -812,7 +976,7 @@ private struct ResizeHandles: View {
 
     private func applyAspectRatio(rect: CGRect, startFrame: CGRect, aspect: CGFloat, position: Edge) -> CGRect {
         let clampedAspect = max(aspect, 0.0001)
-        let minSize: CGFloat = 10
+        let minSize: CGFloat = 0.01
         var width = rect.width
         var height = rect.height
 
@@ -969,13 +1133,19 @@ extension View {
 }
 
 private struct EntryHitShape: ViewModifier {
-    let isCircle: Bool
+    let shapeKind: ShapeKind?
 
     func body(content: Content) -> some View {
-        if isCircle {
-            content.contentShape(Circle())
-        } else {
-            content.contentShape(Rectangle())
+        guard let kind = shapeKind else {
+            return AnyView(content.contentShape(Rectangle()))
+        }
+        switch kind {
+        case .circle:
+            return AnyView(content.contentShape(Circle()))
+        case .rect:
+            return AnyView(content.contentShape(Rectangle()))
+        case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+            return AnyView(content.contentShape(TriangleShape(kind: kind)))
         }
     }
 }

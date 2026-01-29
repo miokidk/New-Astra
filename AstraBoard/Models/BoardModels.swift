@@ -10,7 +10,12 @@ enum Actor: String, Codable {
 }
 
 enum ShapeKind: String, Codable {
-    case rect, circle
+    case rect
+    case circle
+    case triangleUp
+    case triangleDown
+    case triangleLeft
+    case triangleRight
 }
 
 struct ColorComponents: Codable, Hashable {
@@ -28,18 +33,12 @@ struct ShapeStyle: Codable, Hashable {
 
     static func `default`(for kind: ShapeKind) -> ShapeStyle {
         switch kind {
-        case .rect:
+        case .rect, .circle, .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
             return ShapeStyle(fillColor: ColorComponents(red: 0.6, green: 0.6, blue: 0.6),
-                              fillOpacity: 1.0,
-                              borderColor: ColorComponents(red: 0.6, green: 0.6, blue: 0.6),
-                              borderOpacity: 0.0,
-                              borderWidth: 0)
-        case .circle:
-            return ShapeStyle(fillColor: ColorComponents(red: 0.6, green: 0.6, blue: 0.6),
-                              fillOpacity: 1.0,
-                              borderColor: ColorComponents(red: 0.6, green: 0.6, blue: 0.6),
-                              borderOpacity: 0.0,
-                              borderWidth: 0)
+                            fillOpacity: 1.0,
+                            borderColor: ColorComponents(red: 0.6, green: 0.6, blue: 0.6),
+                            borderOpacity: 0.0,
+                            borderWidth: 0)
         }
     }
 }

@@ -8,7 +8,7 @@ struct ToolPaletteView: View {
     @State private var showBoardsPopover = false
 
     private var paletteTools: [BoardTool] {
-        BoardTool.allCases.filter { $0 != .select }
+        BoardTool.allCases.filter { $0 != .select && $0 != .rect && $0 != .circle }
     }
     private var paletteBackground: Color {
         Color(NSColor.windowBackgroundColor).opacity(colorScheme == .dark ? 0.7 : 0.8)
@@ -32,27 +32,73 @@ struct ToolPaletteView: View {
         Color.red.opacity(colorScheme == .dark ? 0.5 : 0.35)
     }
 
+    private func chooseShape(_ kind: ShapeKind) {
+        store.pendingShapeKind = kind
+        store.currentTool = .rect   // treat .rect as the “shape tool”
+        store.hideToolMenu()
+    }
+
+    private func shapeSymbol(for kind: ShapeKind) -> String {
+        switch kind {
+        case .rect: return "rectangle"
+        case .circle: return "circle"
+        case .triangleUp: return "arrowtriangle.up.fill"
+        case .triangleDown: return "arrowtriangle.down.fill"
+        case .triangleLeft: return "arrowtriangle.left.fill"
+        case .triangleRight: return "arrowtriangle.right.fill"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             ForEach(paletteTools) { tool in
-                            Button {
-                                if store.currentTool == tool {
-                                    store.currentTool = .select
-                                } else {
-                                    store.currentTool = tool
-                                }
-                                store.hideToolMenu()
-                            } label: {
-                                Image(systemName: symbol(for: tool))
-                                    .frame(width: 32, height: 32)
-                                    .background(store.currentTool == tool ? activeButtonBackground : buttonBackground)
-                                    .foregroundColor(.primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
-                                    .cornerRadius(8)
-                                    .help(tool.label)
-                            }
-                            .buttonStyle(.plain)
-                        }
+                Button {
+                    if store.currentTool == tool {
+                        store.currentTool = .select
+                    } else {
+                        store.currentTool = tool
+                    }
+                    store.hideToolMenu()
+                } label: {
+                    Image(systemName: symbol(for: tool))
+                        .frame(width: 32, height: 32)
+                        .background(store.currentTool == tool ? activeButtonBackground : buttonBackground)
+                        .foregroundColor(.primary)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+                        .cornerRadius(8)
+                        .help(tool.label)
+                }
+                .buttonStyle(.plain)
+            }
+            Menu {
+                Button { chooseShape(.rect) } label: {
+                    Label("Rectangle", systemImage: "rectangle")
+                }
+
+                Divider()
+
+                Button { chooseShape(.triangleDown) } label: {
+                    Label("Triangle (Up/Down)", systemImage: "arrowtriangle.down.fill")
+                }
+
+                Button { chooseShape(.triangleRight) } label: {
+                    Label("Triangle (Left/Right)", systemImage: "arrowtriangle.right.fill")
+                }
+
+                Divider()
+
+                Button { chooseShape(.circle) } label: {
+                    Label("Circle", systemImage: "circle")
+                }
+            } label: {
+                Image(systemName: shapeSymbol(for: store.pendingShapeKind))
+                    .frame(width: 32, height: 32)
+                    .background((store.currentTool == .rect || store.currentTool == .circle) ? activeButtonBackground : buttonBackground)
+                    .foregroundColor(.primary)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+                    .cornerRadius(8)
+                    .help("Add Shape")
+            }
             Button {
                 store.togglePanel(.settings)
                 store.hideToolMenu()
