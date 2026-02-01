@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 70;
+	objectVersion = 56;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -20,12 +20,19 @@
 		8637CDA12F23D9A400BE8671 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 8637CDA02F23D9A400BE8671 /* libsqlite3.tbd */; };
 		8637CDA32F23D9CB00BE8671 /* DictionaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8637CDA22F23D9C900BE8671 /* DictionaryService.swift */; };
 		8637CDA42F23D9CB00BE8671 /* DictionaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8637CDA22F23D9C900BE8671 /* DictionaryService.swift */; };
+		866B124F2F2EED06008B9DA3 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 866B124E2F2EED00008B9DA3 /* NetworkMonitor.swift */; };
+		866B12502F2EED06008B9DA3 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 866B124E2F2EED00008B9DA3 /* NetworkMonitor.swift */; };
+		866B12522F2EED37008B9DA3 /* ToolDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 866B12512F2EED35008B9DA3 /* ToolDefinition.swift */; };
+		866B12532F2EED37008B9DA3 /* ToolDefinition.swift in Sources */ = {isa = PBXBuildFile; fileRef = 866B12512F2EED35008B9DA3 /* ToolDefinition.swift */; };
 		86AAA8BC2F146B8500A961AE /* BoardModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAMODELFILE /* BoardModels.swift */; };
 		86AAA8BD2F146B9E00A961AE /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = AASERVFILE /* Services.swift */; };
 		86AAA8BE2F146B9E00A961AE /* TextEntryMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = AATEXTMETRICSFILE /* TextEntryMetrics.swift */; };
 		86AAA8C02F146B9E00A961AE /* Geometry+Utils.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAGEOMFILE /* Geometry+Utils.swift */; };
 		86AAA8C52F146F6700A961AE /* PersistenceService+ImportExport_macOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */; };
+		98AC2B3AA2924628847CDC19 /* NoteBodyTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F214C47D83447599F9F3E3D /* NoteBodyTextView.swift */; };
 		9C45F65B1838434EB74C64B6 /* SupabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B41C163DEAB49B9887F3E95 /* SupabaseService.swift */; };
+		A8C1D2E3F4B5C67890D0E1F3 /* OllamaChatService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C1D2E3F4B5C67890D0E1F2 /* OllamaChatService.swift */; };
+		A8C1D2E3F4B5C67890D0E1F4 /* OllamaChatService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8C1D2E3F4B5C67890D0E1F2 /* OllamaChatService.swift */; };
 		AA5B1C2D3E4F5061728394A6 /* VoicePillView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5B1C2D3E4F5061728394A5 /* VoicePillView.swift */; };
 		AAAPPBUILD /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAAPPFILE /* App.swift */; };
 		AAASSETSBUILD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AAASSETSFILE /* Assets.xcassets */; };
@@ -53,9 +60,13 @@
 		8637CD9E2F23D99D00BE8671 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
 		8637CDA02F23D9A400BE8671 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libsqlite3.tbd; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.2.sdk/usr/lib/libsqlite3.tbd; sourceTree = DEVELOPER_DIR; };
 		8637CDA22F23D9C900BE8671 /* DictionaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryService.swift; sourceTree = "<group>"; };
+		866B124D2F2E902A008B9DA3 /* Astra IOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Astra IOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		866B124E2F2EED00008B9DA3 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
+		866B12512F2EED35008B9DA3 /* ToolDefinition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolDefinition.swift; sourceTree = "<group>"; };
 		8695479E2F2A92C00050775F /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PersistenceService+ImportExport_macOS.swift"; sourceTree = "<group>"; };
-		86F9132C2F14621A00F98D09 /* Astra IOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Astra IOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		8F214C47D83447599F9F3E3D /* NoteBodyTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoteBodyTextView.swift; sourceTree = "<group>"; };
+		A8C1D2E3F4B5C67890D0E1F2 /* OllamaChatService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OllamaChatService.swift; sourceTree = "<group>"; };
 		AA5B1C2D3E4F5061728394A5 /* VoicePillView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePillView.swift; sourceTree = "<group>"; };
 		AAAPPFILE /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
 		AAASSETSFILE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -75,10 +86,6 @@
 		E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceInputManager.swift; sourceTree = "<group>"; };
 		E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceWakeListener.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-		86F9132D2F14621A00F98D09 /* Astra IOS */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = "Astra IOS"; sourceTree = "<group>"; };
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		86F913292F14621A00F98D09 /* Frameworks */ = {
@@ -126,6 +133,7 @@
 				AAHUDPANFILE /* HUDAndPanels.swift */,
 				AATOOLFILE /* ToolPaletteView.swift */,
 				AABOARDSPOPOVERFILE /* BoardsPopoverView.swift */,
+				8F214C47D83447599F9F3E3D /* NoteBodyTextView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -170,15 +178,16 @@
 				8695479E2F2A92C00050775F /* .gitignore */,
 				AAMAIN /* AstraBoard */,
 				AAPRODUCT /* AstraBoard.app */,
-				86F9132C2F14621A00F98D09 /* Astra IOS.app */,
-				86F9132D2F14621A00F98D09 /* Astra IOS */,
 				8637CD9D2F23D99D00BE8671 /* Frameworks */,
+				866B124D2F2E902A008B9DA3 /* Astra IOS.app */,
 			);
 			sourceTree = "<group>";
 		};
 		AASERVGROUP /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				866B12512F2EED35008B9DA3 /* ToolDefinition.swift */,
+				866B124E2F2EED00008B9DA3 /* NetworkMonitor.swift */,
 				86AAA8C42F146F6000A961AE /* PersistenceService+ImportExport_macOS.swift */,
 				B7C90E1D1BA24FB2B59DFDB2 /* BoardSyncService.swift */,
 				09B0B31377444B2CB4398288 /* AuthService.swift */,
@@ -186,6 +195,7 @@
 				E5A1C0A52F5E4C1D00B1A2C3 /* VoiceInputManager.swift */,
 				E5A1C0A92F5E4D1200B1A2C3 /* VoiceWakeListener.swift */,
 				AASERVFILE /* Services.swift */,
+				A8C1D2E3F4B5C67890D0E1F2 /* OllamaChatService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -223,15 +233,12 @@
 			);
 			dependencies = (
 			);
-			fileSystemSynchronizedGroups = (
-				86F9132D2F14621A00F98D09 /* Astra IOS */,
-			);
 			name = "Astra IOS";
 			packageProductDependencies = (
 				9DACBEA686B349228F0FDB43 /* Supabase */,
 			);
 			productName = "Astra IOS";
-			productReference = 86F9132C2F14621A00F98D09 /* Astra IOS.app */;
+			productReference = 866B124D2F2E902A008B9DA3 /* Astra IOS.app */;
 			productType = "com.apple.product-type.application";
 		};
 		AATARGET /* AstraBoard */ = {
@@ -323,11 +330,14 @@
 				86AAA8BC2F146B8500A961AE /* BoardModels.swift in Sources */,
 				86AAA8BD2F146B9E00A961AE /* Services.swift in Sources */,
 				E5A1C0A62F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */,
+				866B12532F2EED37008B9DA3 /* ToolDefinition.swift in Sources */,
 				E5A1C0A82F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */,
 				5ED57DDAF928096761089542 /* BoardStore.swift in Sources */,
 				8637CDA42F23D9CB00BE8671 /* DictionaryService.swift in Sources */,
+				866B12502F2EED06008B9DA3 /* NetworkMonitor.swift in Sources */,
 				86AAA8BE2F146B9E00A961AE /* TextEntryMetrics.swift in Sources */,
 				86AAA8C02F146B9E00A961AE /* Geometry+Utils.swift in Sources */,
+				A8C1D2E3F4B5C67890D0E1F3 /* OllamaChatService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -339,12 +349,16 @@
 				4935EFE22F3B4A1E8D609AD9 /* AuthService.swift in Sources */,
 				32E943EDF68241DE8F61A233 /* SupabaseService.swift in Sources */,
 				AAHUDPANBUILD /* HUDAndPanels.swift in Sources */,
+				866B12522F2EED37008B9DA3 /* ToolDefinition.swift in Sources */,
 				AATOOLBUILD /* ToolPaletteView.swift in Sources */,
 				AABOARDSPOPOVERBUILD /* BoardsPopoverView.swift in Sources */,
 				AAENTRYVBUILD /* EntryRenderers.swift in Sources */,
 				AABOARDVBUILD /* BoardViews.swift in Sources */,
+				98AC2B3AA2924628847CDC19 /* NoteBodyTextView.swift in Sources */,
 				AA5B1C2D3E4F5061728394A6 /* VoicePillView.swift in Sources */,
 				AASERVBUILD /* Services.swift in Sources */,
+				866B124F2F2EED06008B9DA3 /* NetworkMonitor.swift in Sources */,
+				A8C1D2E3F4B5C67890D0E1F4 /* OllamaChatService.swift in Sources */,
 				E5A1C0A72F5E4C1D00B1A2C3 /* VoiceInputManager.swift in Sources */,
 				E5A1C0AA2F5E4D1200B1A2C3 /* VoiceWakeListener.swift in Sources */,
 				8637CDA32F23D9CB00BE8671 /* DictionaryService.swift in Sources */,

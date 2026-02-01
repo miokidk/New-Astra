@@ -34,8 +34,8 @@ struct ToolPaletteView: View {
 
     private func chooseShape(_ kind: ShapeKind) {
         store.pendingShapeKind = kind
-        store.currentTool = .rect   // treat .rect as the “shape tool”
         store.hideToolMenu()
+        store.paletteInsertShape(kind: kind, at: store.toolMenuScreenPosition)
     }
 
     private func shapeSymbol(for kind: ShapeKind) -> String {
@@ -53,12 +53,21 @@ struct ToolPaletteView: View {
         HStack(spacing: 10) {
             ForEach(paletteTools) { tool in
                 Button {
-                    if store.currentTool == tool {
-                        store.currentTool = .select
-                    } else {
-                        store.currentTool = tool
+                    switch tool {
+                    case .text:
+                        store.hideToolMenu()
+                        _ = store.paletteInsertText(at: store.toolMenuScreenPosition)
+                    case .image:
+                        store.hideToolMenu()
+                        store.paletteInsertImage(at: store.toolMenuScreenPosition)
+                    default:
+                        if store.currentTool == tool {
+                            store.currentTool = .select
+                        } else {
+                            store.currentTool = tool
+                        }
+                        store.hideToolMenu()
                     }
-                    store.hideToolMenu()
                 } label: {
                     Image(systemName: symbol(for: tool))
                         .frame(width: 32, height: 32)
@@ -114,16 +123,16 @@ struct ToolPaletteView: View {
             .buttonStyle(.plain)
 
             Button {
-                store.togglePanel(.personality)
+                store.togglePanel(.notes)
                 store.hideToolMenu()
             } label: {
                 Image(systemName: "person.crop.circle")
                     .frame(width: 32, height: 32)
-                    .background(store.doc.ui.panels.personality.isOpen ? activeButtonBackground : buttonBackground)
+                    .background(store.doc.ui.panels.notes.isOpen ? activeButtonBackground : buttonBackground)
                     .foregroundColor(.primary)
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
                     .cornerRadius(8)
-                    .help("Personality")
+                    .help("Notes")
             }
             .buttonStyle(.plain)
 

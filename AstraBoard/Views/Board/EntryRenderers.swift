@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreImage
 
 struct EntryContainerView: View {
     @EnvironmentObject var store: BoardStore
@@ -13,6 +14,10 @@ struct EntryContainerView: View {
     var isSelected: Bool { store.selection.contains(entry.id) }
     private var entryShadowColor: Color {
         Color.black.opacity(colorScheme == .dark ? 0.35 : 0.12)
+    }
+    
+    private var isCroppingThisImage: Bool {
+        store.doc.ui.activeImageCropID == entry.id
     }
 
     var body: some View {
@@ -71,6 +76,15 @@ struct EntryContainerView: View {
                 Button("Copy Image") { store.copyImageToPasteboard(id: entry.id) }
                 Button("Save Image…") { store.saveImageEntryToDisk(id: entry.id) }
                 Divider()
+                if store.doc.ui.activeImageCropID == entry.id {
+                    Button("Done Cropping") { store.endImageCrop() }
+                } else {
+                    Button("Crop…") { store.beginImageCrop(entry.id) }
+                }
+                if entry.imageCrop != nil {
+                    Button("Reset Crop") { store.resetImageCrop(entry.id) }
+                }
+                Divider()
             }
             if entry.type == .text {
                 Button("Copy Text") { store.copyTextToPasteboard(id: entry.id) }
@@ -84,6 +98,27 @@ struct EntryContainerView: View {
             }
             Button("Bring to Front") { store.bringToFront(ids: [entry.id]) }
             Button("Send to Back") { store.sendToBack(ids: [entry.id]) }
+            
+            if store.selection.count >= 2, store.selection.contains(entry.id) {
+                Divider()
+                Button("Group Items") {
+                    store.groupSelectedItems()
+                }
+            }
+            
+            if let gid = entry.groupID {
+                Divider()
+                Button("Ungroup") {
+                    // If multiple selected, ungroup any groups in the selection.
+                    // Otherwise, just ungroup this entry’s group.
+                    if store.selection.count >= 2, store.selection.contains(entry.id) {
+                        store.ungroupSelectedGroups()
+                    } else {
+                        store.ungroupGroup(gid)
+                    }
+                }
+            }
+            
             Button("Duplicate") { store.selection = [entry.id]; store.duplicateSelected() }
             Button("Delete") { store.selection = [entry.id]; store.deleteSelected() }
         }
@@ -98,7 +133,9 @@ struct EntryContainerView: View {
                     selectionOutlineView(color: Color(NSColor.separatorColor),
                                          lineWidth: 1 / store.doc.viewport.zoom.cg)
                 }
-                if store.selection.count == 1 {
+                if isCroppingThisImage {
+                    ImageCropOverlay(entryID: entry.id)
+                } else if store.selection.count == 1 {
                     ResizeHandles(entry: entry, activeTextEdit: $activeTextEdit)
                 }
             }
@@ -141,6 +178,7 @@ struct EntryContainerView: View {
                     let origin = CGPoint(x: rect.origin.x + delta.width, y: rect.origin.y + delta.height)
                     store.setEntryOrigin(id: id, origin: origin)
                 }
+                guard !isCroppingThisImage else { return }
             }
             .onEnded { _ in
                 dragStartFrames = [:]
@@ -179,9 +217,22 @@ struct EntryContainerView: View {
             case .circle:
                 outsideStrokeCircle(lineWidth: lineWidth, color: color)
             case .rect:
-                outsideStrokeRoundedRect(cornerRadius: 8, lineWidth: lineWidth, color: color)
+                let zoom = store.doc.viewport.zoom.cg
+                let style = store.shapeStyle(for: entry)
+
+                let w = entry.w.cg * zoom
+                let h = entry.h.cg * zoom
+
+                let desired = max(0, style.cornerRadius) * zoom
+                let cornerRadius = min(desired, min(w, h) / 2)
+
+                outsideStrokeRoundedRect(cornerRadius: cornerRadius, lineWidth: lineWidth, color: color)
             case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
-                outsideStrokeTriangle(kind: kind, lineWidth: lineWidth, color: color)
+                let zoom = store.doc.viewport.zoom.cg
+                let style = store.shapeStyle(for: entry)
+                let desired = max(0, style.cornerRadius) * zoom
+
+                outsideStrokeTriangle(kind: kind, cornerRadius: desired, lineWidth: lineWidth, color: color)
             }
         case .text:
             outsideStrokeRoundedRect(cornerRadius: 12, lineWidth: lineWidth, color: color)
@@ -198,9 +249,15 @@ struct EntryContainerView: View {
 @ViewBuilder
 private func outsideStrokeRoundedRect(cornerRadius: CGFloat, lineWidth: CGFloat, color: Color) -> some View {
     if lineWidth > 0 {
-        RoundedRectangle(cornerRadius: cornerRadius + lineWidth / 2)
-            .inset(by: -lineWidth / 2)
-            .stroke(color, lineWidth: lineWidth)
+        if cornerRadius <= 0.0001 {
+            Rectangle()
+                .inset(by: -lineWidth / 2)
+                .stroke(color, lineWidth: lineWidth)
+        } else {
+            RoundedRectangle(cornerRadius: cornerRadius + lineWidth / 2, style: .continuous)
+                .inset(by: -lineWidth / 2)
+                .stroke(color, lineWidth: lineWidth)
+        }
     }
 }
 
@@ -236,7 +293,7 @@ struct EntryContentView: View {
         }
         return .clear
     }
-
+    
     var body: some View {
         ZStack {
             switch entry.data {
@@ -266,11 +323,19 @@ struct EntryContentView: View {
                 .onChange(of: textStyle) { _ in
                     syncTextEntrySize(text: text, style: textStyle)
                 }
+
             case .image(let ref):
-                if let url = store.imageURL(for: ref), let nsImage = NSImage(contentsOf: url) {
-                    Image(nsImage: nsImage)
+                let isCropping = (store.doc.ui.activeImageCropID == entry.id)
+                if let url = store.imageURL(for: ref),
+                   let nsImage = NSImage(contentsOf: url) {
+
+                    let displayImage: NSImage = {
+                        guard !isCropping, let crop = entry.imageCrop else { return nsImage }
+                        return croppedImage(nsImage, crop: crop) ?? nsImage
+                    }()
+
+                    Image(nsImage: displayImage)
                         .resizable()
-                        // Changed from scaledToFit to allow free resizing
                         .scaledToFill()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .clipped()
@@ -281,22 +346,33 @@ struct EntryContentView: View {
                         Text("Image missing").foregroundColor(.secondary)
                     }
                 }
+
             case .file(let ref):
                 FileEntryView(ref: ref)
+
             case .shape(let kind):
                 let style = store.shapeStyle(for: entry)
                 let zoom = store.doc.viewport.zoom.cg
                 let fill = style.fillColor.color.opacity(style.fillOpacity)
                 let stroke = style.borderColor.color.opacity(style.borderOpacity)
                 let lineWidth = max(style.borderWidth, 0) * zoom
+
                 switch kind {
                 case .rect:
-                    let cornerRadius: CGFloat = 8
-                    RoundedRectangle(cornerRadius: cornerRadius)
+                    let w = entry.w.cg * zoom
+                    let h = entry.h.cg * zoom
+                    let desired = max(0, style.cornerRadius) * zoom
+                    let cornerRadius = min(desired, min(w, h) / 2)
+
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(fill)
-                        .overlay(outsideStrokeRoundedRect(cornerRadius: cornerRadius,
-                                                        lineWidth: lineWidth,
-                                                        color: stroke))
+                        .overlay(
+                            outsideStrokeRoundedRect(
+                                cornerRadius: cornerRadius,
+                                lineWidth: lineWidth,
+                                color: stroke
+                            )
+                        )
 
                 case .circle:
                     Circle()
@@ -304,10 +380,19 @@ struct EntryContentView: View {
                         .overlay(outsideStrokeCircle(lineWidth: lineWidth, color: stroke))
 
                 case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
-                    TriangleShape(kind: kind)
+                    let desired = max(0, style.cornerRadius) * zoom
+                    RoundedTriangleShape(kind: kind, cornerRadius: desired)
                         .fill(fill)
-                        .overlay(outsideStrokeTriangle(kind: kind, lineWidth: lineWidth, color: stroke))
+                        .overlay(
+                            outsideStrokeTriangle(
+                                kind: kind,
+                                cornerRadius: desired,
+                                lineWidth: lineWidth,
+                                color: stroke
+                            )
+                        )
                 }
+
             case .line(let data):
                 let zoom = store.doc.viewport.zoom.cg
                 let lineColor: Color = (colorScheme == .dark) ? .white : .black
@@ -316,6 +401,33 @@ struct EntryContentView: View {
             }
         }
         .background(entryBackground)
+    }
+
+    // MARK: - Cropping
+
+    private static let cropContext = CIContext(options: nil)
+
+    private func croppedImage(_ image: NSImage, crop: ImageCropInsets) -> NSImage? {
+        let crop = crop.clamped()
+        guard crop != .none else { return image }
+
+        guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let ci = CIImage(cgImage: cg)
+
+        let w = ci.extent.width
+        let h = ci.extent.height
+        guard w > 0, h > 0 else { return nil }
+
+        let rect = CGRect(
+            x: CGFloat(crop.left) * w,
+            y: CGFloat(crop.bottom) * h,
+            width: max(1, (1 - CGFloat(crop.left) - CGFloat(crop.right)) * w),
+            height: max(1, (1 - CGFloat(crop.top) - CGFloat(crop.bottom)) * h)
+        ).integral
+
+        let cropped = ci.cropped(to: rect)
+        guard let out = Self.cropContext.createCGImage(cropped, from: cropped.extent) else { return nil }
+        return NSImage(cgImage: out, size: NSSize(width: rect.width, height: rect.height))
     }
 
     private func syncTextEntrySize(text: String, style: TextStyle) {
@@ -563,12 +675,148 @@ private struct TriangleShape: InsettableShape {
     }
 }
 
+private struct RoundedTriangleShape: InsettableShape {
+    let kind: ShapeKind
+    var cornerRadius: CGFloat
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+
+        let minX = r.minX, midX = r.midX, maxX = r.maxX
+        let minY = r.minY, midY = r.midY, maxY = r.maxY
+
+        let p0: CGPoint
+        let p1: CGPoint
+        let p2: CGPoint
+
+        switch kind {
+        case .triangleUp:
+            p0 = CGPoint(x: midX, y: minY)
+            p1 = CGPoint(x: maxX, y: maxY)
+            p2 = CGPoint(x: minX, y: maxY)
+        case .triangleDown:
+            p0 = CGPoint(x: midX, y: maxY)
+            p1 = CGPoint(x: minX, y: minY)
+            p2 = CGPoint(x: maxX, y: minY)
+        case .triangleLeft:
+            p0 = CGPoint(x: minX, y: midY)
+            p1 = CGPoint(x: maxX, y: minY)
+            p2 = CGPoint(x: maxX, y: maxY)
+        case .triangleRight:
+            p0 = CGPoint(x: maxX, y: midY)
+            p1 = CGPoint(x: minX, y: minY)
+            p2 = CGPoint(x: minX, y: maxY)
+        case .rect, .circle:
+            // Not used for these kinds
+            var p = Path()
+            p.addRect(r)
+            return p
+        }
+
+        func dist(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            hypot(a.x - b.x, a.y - b.y)
+        }
+
+        func unit(_ v: CGVector) -> CGVector {
+            let m = max(0.000001, hypot(v.dx, v.dy))
+            return CGVector(dx: v.dx / m, dy: v.dy / m)
+        }
+
+        func dot(_ a: CGVector, _ b: CGVector) -> CGFloat {
+            a.dx * b.dx + a.dy * b.dy
+        }
+
+        func clamp(_ x: CGFloat, _ lo: CGFloat, _ hi: CGFloat) -> CGFloat {
+            min(max(x, lo), hi)
+        }
+
+        func angle(prev: CGPoint, corner: CGPoint, next: CGPoint) -> CGFloat {
+            // interior angle at `corner`
+            let v1 = unit(CGVector(dx: prev.x - corner.x, dy: prev.y - corner.y))
+            let v2 = unit(CGVector(dx: next.x - corner.x, dy: next.y - corner.y))
+            return acos(clamp(dot(v1, v2), -1, 1))
+        }
+
+        func pointAlong(from a: CGPoint, to b: CGPoint, distance d: CGFloat) -> CGPoint {
+            let v = unit(CGVector(dx: b.x - a.x, dy: b.y - a.y))
+            return CGPoint(x: a.x + v.dx * d, y: a.y + v.dy * d)
+        }
+
+        let desired = max(0, cornerRadius)
+
+        // If 0, draw a true sharp triangle.
+        if desired <= 0.0001 {
+            var p = Path()
+            p.move(to: p0)
+            p.addLine(to: p1)
+            p.addLine(to: p2)
+            p.closeSubpath()
+            return p
+        }
+
+        // Interior angles
+        let a0 = angle(prev: p2, corner: p0, next: p1)
+        let a1 = angle(prev: p0, corner: p1, next: p2)
+        let a2 = angle(prev: p1, corner: p2, next: p0)
+
+        // Maximum legal radius at each corner: r <= min(edgeLen1, edgeLen2) * tan(angle/2)
+        func maxRadiusAt(prev: CGPoint, corner: CGPoint, next: CGPoint, ang: CGFloat) -> CGFloat {
+            let e1 = dist(prev, corner)
+            let e2 = dist(next, corner)
+            let t = tan(ang / 2)
+            if t <= 0.000001 { return 0 }
+            return min(e1, e2) * t
+        }
+
+        let maxR0 = maxRadiusAt(prev: p2, corner: p0, next: p1, ang: a0)
+        let maxR1 = maxRadiusAt(prev: p0, corner: p1, next: p2, ang: a1)
+        let maxR2 = maxRadiusAt(prev: p1, corner: p2, next: p0, ang: a2)
+
+        let maxAllowed = max(0, min(maxR0, min(maxR1, maxR2)))
+        let rr = min(desired, maxAllowed)
+
+        if rr <= 0.0001 {
+            var p = Path()
+            p.move(to: p0)
+            p.addLine(to: p1)
+            p.addLine(to: p2)
+            p.closeSubpath()
+            return p
+        }
+
+        // Tangent distances along each adjacent edge
+        let t0 = rr / max(0.000001, tan(a0 / 2))
+        let start = pointAlong(from: p0, to: p1, distance: t0)
+
+        // Build rounded triangle. Starting at a tangent point prevents “one side stays straight”.
+        var p = Path()
+        p.move(to: start)
+        p.addArc(tangent1End: p1, tangent2End: p2, radius: rr)
+        p.addArc(tangent1End: p2, tangent2End: p0, radius: rr)
+        p.addArc(tangent1End: p0, tangent2End: p1, radius: rr)
+        p.closeSubpath()
+        return p
+    }
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
 @ViewBuilder
-private func outsideStrokeTriangle(kind: ShapeKind, lineWidth: CGFloat, color: Color) -> some View {
+private func outsideStrokeTriangle(kind: ShapeKind, cornerRadius: CGFloat, lineWidth: CGFloat, color: Color) -> some View {
     if lineWidth > 0 {
-        TriangleShape(kind: kind)
-            .inset(by: -lineWidth / 2)
-            .stroke(color, lineWidth: lineWidth)
+        if cornerRadius <= 0.0001 {
+            TriangleShape(kind: kind)
+                .inset(by: -lineWidth / 2)
+                .stroke(color, lineWidth: lineWidth)
+        } else {
+            RoundedTriangleShape(kind: kind, cornerRadius: cornerRadius + lineWidth / 2)
+                .inset(by: -lineWidth / 2)
+                .stroke(color, lineWidth: lineWidth)
+        }
     }
 }
 
@@ -1117,6 +1365,146 @@ private struct ResizeHandles: View {
             return true
         }
         return false
+    }
+}
+
+// MARK: - Image Crop Overlay
+
+private struct ImageCropOverlay: View {
+    @EnvironmentObject var store: BoardStore
+    let entryID: UUID
+
+    @State private var startCrop: ImageCropInsets?
+    @State private var activeEdge: Edge?
+
+    private enum Edge { case left, right, top, bottom }
+
+    private var crop: ImageCropInsets {
+        store.doc.entries[entryID]?.imageCrop ?? .none
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let size = geo.size
+            let c = crop.clamped()
+            let cropRect = rect(for: c, in: size)
+
+            ZStack {
+                // Dim outside crop
+                Path { p in
+                    p.addRect(CGRect(origin: .zero, size: size))
+                    p.addRect(cropRect)
+                }
+                .fill(Color.black.opacity(0.35), style: FillStyle(eoFill: true))
+
+                // Border
+                Rectangle()
+                    .path(in: cropRect)
+                    .stroke(Color.white.opacity(0.85), lineWidth: 1)
+            }
+            .contentShape(Rectangle()) // whole overlay receives the drag
+            .gesture(cropGesture(in: size))
+        }
+        .allowsHitTesting(true)
+    }
+
+    private func rect(for c: ImageCropInsets, in size: CGSize) -> CGRect {
+        CGRect(
+            x: CGFloat(c.left) * size.width,
+            y: CGFloat(c.top) * size.height,
+            width: max(1, (1 - CGFloat(c.left) - CGFloat(c.right)) * size.width),
+            height: max(1, (1 - CGFloat(c.top) - CGFloat(c.bottom)) * size.height)
+        )
+    }
+
+    private func closestEdge(start: CGPoint, cropRect: CGRect) -> Edge? {
+        let threshold: CGFloat = 18
+
+        let dLeft = abs(start.x - cropRect.minX)
+        let dRight = abs(start.x - cropRect.maxX)
+        let dTop = abs(start.y - cropRect.minY)
+        let dBottom = abs(start.y - cropRect.maxY)
+
+        let best = [
+            (Edge.left, dLeft),
+            (Edge.right, dRight),
+            (Edge.top, dTop),
+            (Edge.bottom, dBottom)
+        ].min(by: { $0.1 < $1.1 })
+
+        guard let pick = best, pick.1 <= threshold else { return nil }
+        return pick.0
+    }
+
+    private func cropGesture(in canvasSize: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if startCrop == nil {
+                    startCrop = crop
+                }
+                guard let start = startCrop else { return }
+
+                // Choose edge ONCE from the start location.
+                if activeEdge == nil {
+                    let startRect = rect(for: start.clamped(), in: canvasSize)
+                    activeEdge = closestEdge(start: value.startLocation, cropRect: startRect)
+                }
+                guard let edge = activeEdge else { return }
+
+                let dx = Double(value.translation.width / max(canvasSize.width, 1))
+                let dy = Double(value.translation.height / max(canvasSize.height, 1))
+
+                var next = start
+
+                switch edge {
+                case .left:
+                    next.left = start.left + dx
+                case .right:
+                    next.right = start.right - dx
+                case .top:
+                    next.top = start.top + dy
+                case .bottom:
+                    next.bottom = start.bottom - dy
+                }
+
+                store.setImageCrop(entryID, crop: next.clamped(), recordUndo: false)
+            }
+            .onEnded { _ in
+                // Commit
+                store.setImageCrop(entryID, crop: crop.clamped(), recordUndo: true, fallbackUndoFrom: startCrop)
+                startCrop = nil
+                activeEdge = nil
+            }
+    }
+}
+
+// MARK: - BoardStore helpers (Image Crop)
+
+extension BoardStore {
+    func beginImageCrop(_ id: UUID) {
+        select(id)
+        doc.ui.activeImageCropID = id
+    }
+
+    func endImageCrop() {
+        doc.ui.activeImageCropID = nil
+    }
+
+    func resetImageCrop(_ id: UUID) {
+        guard var e = doc.entries[id] else { return }
+        e.imageCrop = nil
+        doc.entries[id] = e
+    }
+
+    /// Updates the crop for an image entry. `recordUndo` is accepted for API consistency,
+    /// but this implementation simply mutates the doc.
+    func setImageCrop(_ id: UUID,
+                      crop: ImageCropInsets,
+                      recordUndo: Bool,
+                      fallbackUndoFrom: ImageCropInsets? = nil) {
+        guard var e = doc.entries[id] else { return }
+        e.imageCrop = crop.clamped()
+        doc.entries[id] = e
     }
 }
 

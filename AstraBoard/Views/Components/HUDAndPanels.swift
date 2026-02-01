@@ -4,6 +4,10 @@ import Foundation
 import UniformTypeIdentifiers
 import Supabase
 
+extension NSAttributedString.Key {
+    static let codeBlockMarker = NSAttributedString.Key("codeBlockMarker")
+}
+
 final class ChatInputFocusBridge {
     static let shared = ChatInputFocusBridge()
     weak var textView: PasteAwareTextField.PasteAwareTextView?
@@ -670,7 +674,7 @@ struct FloatingPanelHostView: View {
             panelView(for: .memories)
             panelView(for: .shapeStyle)
             panelView(for: .settings)
-            panelView(for: .personality)
+            panelView(for: .notes)
             panelView(for: .reminder)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -740,14 +744,14 @@ struct FloatingPanelHostView: View {
                     SettingsPanelView()
                 }
             }
-        case .personality:
-            if store.doc.ui.panels.personality.isOpen {
-                FloatingPanelView(panelKind: .personality, title: "Personality", box: store.doc.ui.panels.personality, onUpdate: { frame in
-                    store.updatePanel(.personality, frame: frame)
+        case .notes:
+            if store.doc.ui.panels.notes.isOpen {
+                FloatingPanelView(panelKind: .notes, title: "Notes", box: store.doc.ui.panels.notes, onUpdate: { frame in
+                    store.updatePanel(.notes, frame: frame)
                 }, onClose: {
-                    store.togglePanel(.personality)
+                    store.togglePanel(.notes)
                 }) {
-                    PersonalityPanelView()
+                    NotesPanelView()
                 }
             }
         case .reminder:
@@ -1016,24 +1020,24 @@ struct ChatPanelView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
                             ForEach(Array(store.doc.chat.messages.enumerated()), id: \.element.id) { index, msg in
-                                let canRetry = msg.role == .model
-                                    && index == store.doc.chat.messages.count - 1
-                                    && store.pendingChatReplies == 0
-                                let canEdit = msg.role == .user
-                                    && store.pendingChatReplies == 0
-                                let isActiveReply = msg.role == .model
-                                    && index == store.doc.chat.messages.count - 1
-                                    && store.pendingChatReplies > 0
-                                let activityText = (isActiveReply && msg.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                    ? store.chatActivityStatus
-                                    : nil
+                                let canRetry = false
+                                let canEdit = store.pendingChatReplies == 0
+                                let isStreamingAssistant = store.pendingChatReplies > 0 &&
+                                    index == store.doc.chat.messages.count - 1 &&
+                                    msg.role == .assistant
+                                let isLastAssistant = index == store.doc.chat.messages.count - 1 && msg.role == .assistant
+                                let activityText: String? = isStreamingAssistant ? store.chatActivityStatus : nil
+                                let thinkingText: String? = isLastAssistant ? store.chatThinkingText : nil
 
                                 ChatMessageRow(
                                     message: msg,
                                     showsRetry: canRetry,
                                     onRetry: { store.retryChatReply(messageId: msg.id) },
                                     showsEdit: canEdit,
-                                    activityText: activityText
+                                    activityText: activityText,
+                                    thinkingText: thinkingText,
+                                    thinkingExpanded: isLastAssistant ? store.chatThinkingExpanded : false,
+                                    onToggleThinking: { store.chatThinkingExpanded.toggle() }
                                 )
                                 .id(msg.id)
 
@@ -1294,15 +1298,18 @@ private struct ChatActivityStatusView: View {
 
 private struct ChatMessageRow: View {
     @EnvironmentObject var store: BoardStore
+    @Environment(\.colorScheme) private var colorScheme
     let message: ChatMsg
     var showsRetry: Bool = false
     var onRetry: () -> Void = {}
     var showsEdit: Bool = false
     var activityText: String? = nil
+    var thinkingText: String? = nil
+    var thinkingExpanded: Bool = false
+    var onToggleThinking: () -> Void = {}
 
     @State private var isEditing = false
     @State private var draftText = ""
-    @State private var isWebResultsExpanded = false
 
     private enum ChatTypography {
         static let senderFont = ChatStyle.senderFont
@@ -1322,62 +1329,114 @@ private struct ChatMessageRow: View {
     }
 
     private func createMarkdownAttributedString() -> NSAttributedString {
-    guard let md = markdownText else {
-        return NSAttributedString(string: message.text)
-    }
+        guard let md = markdownText else {
+            return NSAttributedString(string: message.text)
+        }
 
-    let s = String(md.characters)
-    let out = NSMutableAttributedString(md)
+        let s = String(md.characters)
+        let out = NSMutableAttributedString(md)
 
-    let baseSize: CGFloat = 17
-    let baseFont = NSFont.systemFont(ofSize: baseSize, weight: .regular)
+        let baseSize: CGFloat = 17
+        let baseFont = NSFont.systemFont(ofSize: baseSize, weight: .regular)
+        
+        let codeBg: NSColor = {
+            if colorScheme == .dark {
+                return NSColor.white.withAlphaComponent(0.12)
+            } else {
+                return NSColor.black.withAlphaComponent(0.08)
+            }
+        }()
 
-    func nsRange(for runRange: Range<AttributedString.Index>) -> NSRange {
-        let lower = md.characters.distance(from: md.characters.startIndex, to: runRange.lowerBound)
-        let upper = md.characters.distance(from: md.characters.startIndex, to: runRange.upperBound)
-        let start = s.index(s.startIndex, offsetBy: lower)
-        let end = s.index(s.startIndex, offsetBy: upper)
-        return NSRange(start..<end, in: s)
-    }
-
-    for run in md.runs {
-        var font = baseFont
-
-        // Headings
-        if let intent = run.attributes.presentationIntent {
-            for c in intent.components {
-                if case .header(let level) = c.kind {
-                    let (size, weight): (CGFloat, NSFont.Weight) = {
-                        switch level {
-                        case 1: return (28, .bold)
-                        case 2: return (24, .bold)
-                        case 3: return (20, .semibold)
-                        default: return (18, .semibold)
-                        }
-                    }()
-                    font = ChatStyle.headingFont(level: level)
+        func nsRange(for runRange: Range<AttributedString.Index>) -> NSRange {
+            let lower = md.characters.distance(from: md.characters.startIndex, to: runRange.lowerBound)
+            let upper = md.characters.distance(from: md.characters.startIndex, to: runRange.upperBound)
+            let start = s.index(s.startIndex, offsetBy: lower)
+            let end = s.index(s.startIndex, offsetBy: upper)
+            return NSRange(start..<end, in: s)
+        }
+        
+        // First pass: identify all code block ranges
+        var codeBlockRanges: [NSRange] = []
+        
+        for run in md.runs {
+            if let intent = run.attributes.presentationIntent {
+                for c in intent.components {
+                    if case .codeBlock(_) = c.kind {
+                        let range = nsRange(for: run.range)
+                        codeBlockRanges.append(range)
+                    }
                 }
             }
         }
-
-        // Bold / italic / code
-        if let inline = run.attributes.inlinePresentationIntent {
-            if inline.contains(.stronglyEmphasized) {
-                font = NSFont.systemFont(ofSize: font.pointSize, weight: .bold)
-            }
-            if inline.contains(.emphasized) {
-                font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
-            }
-            if inline.contains(.code) {
-                font = NSFont.monospacedSystemFont(ofSize: max(16, font.pointSize - 1), weight: .regular)
+        
+        // Merge overlapping ranges
+        codeBlockRanges.sort { $0.location < $1.location }
+        var mergedRanges: [NSRange] = []
+        for range in codeBlockRanges {
+            if let last = mergedRanges.last, NSMaxRange(last) >= range.location {
+                mergedRanges[mergedRanges.count - 1] = NSUnionRange(last, range)
+            } else {
+                mergedRanges.append(range)
             }
         }
+        codeBlockRanges = mergedRanges
 
-        out.addAttribute(.font, value: font, range: nsRange(for: run.range))
+        // Second pass: apply styling
+        for run in md.runs {
+            var font = baseFont
+            var isCodeBlock = false
+            let range = nsRange(for: run.range)
+
+            if let intent = run.attributes.presentationIntent {
+                for c in intent.components {
+                    if case .header(let level) = c.kind {
+                        font = ChatStyle.headingFont(level: level)
+                    }
+                    
+                    if case .codeBlock(let languageHint) = c.kind {
+                        isCodeBlock = true
+                        font = NSFont.monospacedSystemFont(ofSize: max(12, baseSize - 2), weight: .regular)
+                    }
+                }
+            }
+
+            if let inline = run.attributes.inlinePresentationIntent, !isCodeBlock {
+                if inline.contains(.stronglyEmphasized) {
+                    font = NSFont.systemFont(ofSize: font.pointSize, weight: .bold)
+                }
+                if inline.contains(.emphasized) {
+                    font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
+                }
+                if inline.contains(.code) {
+                    font = NSFont.monospacedSystemFont(ofSize: max(16, font.pointSize - 1), weight: .regular)
+                }
+            }
+
+            out.addAttribute(.font, value: font, range: range)
+        }
+        
+        // Third pass: Apply code block styling with custom marker attribute
+        for codeBlockRange in codeBlockRanges {
+            // IMPORTANT: Use custom attribute instead of .backgroundColor
+            // This prevents NSTextView from drawing the default rectangular background
+            out.addAttribute(.codeBlockMarker, value: codeBg, range: codeBlockRange)
+            
+            // Apply uniform monospace font
+            let codeFont = NSFont.monospacedSystemFont(ofSize: max(12, baseSize - 2), weight: .regular)
+            out.addAttribute(.font, value: codeFont, range: codeBlockRange)
+            
+            // Add paragraph style with spacing
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.paragraphSpacingBefore = 12
+            paragraphStyle.paragraphSpacing = 12
+            paragraphStyle.lineSpacing = 3
+            
+            out.addAttribute(.paragraphStyle, value: paragraphStyle, range: codeBlockRange)
+        }
+
+        return out
     }
 
-    return out
-}
 
     private var markdownText: AttributedString? {
         let source = markdownSource
@@ -1421,39 +1480,7 @@ private struct ChatMessageRow: View {
     }
     
     private func linkifyCitationsIfPossible(_ s: String) -> String {
-        guard let web = message.webSearch, !web.items.isEmpty else { return s }
-
-        let ns = s as NSString
-        let pattern = #"\[(\d+)\]"#
-        guard let re = try? NSRegularExpression(pattern: pattern) else { return s }
-
-        let matches = re.matches(in: s, range: NSRange(location: 0, length: ns.length))
-        guard !matches.isEmpty else { return s }
-
-        let mutable = NSMutableString(string: s)
-
-        // Replace from the end so ranges stay valid
-        for m in matches.reversed() {
-            guard m.numberOfRanges >= 2 else { continue }
-
-            let numStr = ns.substring(with: m.range(at: 1))
-            guard let n = Int(numStr), n >= 1, n <= web.items.count else { continue }
-
-            // If it's already a markdown link like [1](...), don't touch it
-            let end = m.range.location + m.range.length
-            if end < ns.length {
-                let nextChar = ns.substring(with: NSRange(location: end, length: 1))
-                if nextChar == "(" { continue }
-            }
-
-            let url = web.items[n - 1].url.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !url.isEmpty else { continue }
-
-            let replacement = "[\(n)](\(url))"
-            mutable.replaceCharacters(in: m.range, with: replacement)
-        }
-
-        return mutable as String
+        s
     }
 
     private func markdownPreservingNewlines(_ text: String) -> AttributedString {
@@ -1550,10 +1577,10 @@ private struct ChatMessageRow: View {
             .help("Pin to board")
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
-                    Text(message.role == .user ? "You" : "Astra")
+                    Text(message.role.chatDisplayName)
                         .font(ChatStyle.senderFont)
                         .foregroundColor(Color(NSColor.secondaryLabelColor))
-                    if message.role == .model && showsRetry {
+                    if showsRetry {
                         Button(action: onRetry) {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 12, weight: .semibold))
@@ -1564,7 +1591,7 @@ private struct ChatMessageRow: View {
                         .foregroundColor(Color(NSColor.secondaryLabelColor))
                         .help("Retry response")
                     }
-                    if message.role == .user && showsEdit && !isEditing {
+                    if showsEdit && !isEditing {
                         Button(action: startEditing) {
                             Image(systemName: "pencil")
                                 .font(.system(size: 12, weight: .semibold))
@@ -1583,55 +1610,6 @@ private struct ChatMessageRow: View {
                     }
                     .font(ChatStyle.timestampFont)
                     .foregroundColor(Color(NSColor.secondaryLabelColor))
-                }
-                if let web = message.webSearch, !web.items.isEmpty {
-                    DisclosureGroup(isExpanded: $isWebResultsExpanded) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Query: \"\(web.query)\"")
-                                .font(.system(size: 13))
-                                .foregroundColor(.secondary)
-
-                            VStack(alignment: .leading, spacing: 10) {
-                                ForEach(Array(web.items.enumerated()), id: \.offset) { idx, item in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        if let url = URL(string: item.url), !item.url.isEmpty {
-                                            Link("\(idx + 1). \(item.title)", destination: url)
-                                                .font(.system(size: 14, weight: .semibold))
-                                        } else {
-                                            Text("\(idx + 1). \(item.title)")
-                                                .font(.system(size: 14, weight: .semibold))
-                                        }
-
-                                        if let snippet = item.snippet,
-                                           !snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                            Text(snippet)
-                                                .font(.system(size: 13))
-                                                .foregroundColor(.secondary)
-                                        }
-
-                                        if !item.url.isEmpty {
-                                            Text(item.url)
-                                                .font(.system(size: 12))
-                                                .foregroundColor(.secondary)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
-                                        }
-                                    }
-                                    .padding(10)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
-                                    )
-                                }
-                            }
-                        }
-                        .padding(.top, 6)
-                        .padding(.bottom, 4)
-                    } label: {
-                        Text("Web results")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(Color(NSColor.secondaryLabelColor))
-                    }
                 }
                 if isEditing {
                     TextEditor(text: $draftText)
@@ -1660,19 +1638,54 @@ private struct ChatMessageRow: View {
                         .controlSize(.small)
                         .disabled(draftText == message.text)
                     }
-                } else if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    // NOTE: SwiftUI's `Text(AttributedString)` + `.textSelection(.enabled)`
-                    // renders links with blue styling but doesn't reliably make them clickable
-                    // on macOS. Use an NSTextView-backed renderer so links open in the browser.
-                    ChatRichTextView(
-                        attributedText: createMarkdownAttributedString(),
-                        baseFont: ChatStyle.baseFont,
-                        textColor: ChatStyle.baseColor,
-                        lineSpacing: 0
-                    )
-                } else if let activityText, !activityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    ChatActivityStatusView(text: activityText)
-                        .padding(.vertical, 2)
+                } else {
+                    // Show thinking section FIRST if we have thinking text
+                    if let thinkingText, !thinkingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button(action: onToggleThinking) {
+                            HStack(spacing: 6) {
+                                Image(systemName: thinkingExpanded ? "chevron.down" : "chevron.right")
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text("Thoughts")
+                                    .font(.system(size: 14, weight: .medium))
+                                Spacer()
+                            }
+                            .foregroundColor(Color(NSColor.secondaryLabelColor))
+                            .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                        .popover(isPresented: Binding(
+                            get: { thinkingExpanded },
+                            set: { _ in onToggleThinking() }
+                        ), arrowEdge: .leading) {
+                            ScrollView {
+                                Text(thinkingText)
+                                    .font(.system(size: 13, weight: .regular))
+                                    .foregroundColor(Color(NSColor.labelColor))
+                                    .textSelection(.enabled)
+                                    .padding(12)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(width: 400, height: 300)
+                            .background(Color(NSColor.controlBackgroundColor))
+                        }
+                    }
+                    
+                    // Then show the main message text
+                    if !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // NOTE: SwiftUI's `Text(AttributedString)` + `.textSelection(.enabled)`
+                        // renders links with blue styling but doesn't reliably make them clickable
+                        // on macOS. Use an NSTextView-backed renderer so links open in the browser.
+                        ChatRichTextView(
+                            attributedText: createMarkdownAttributedString(),
+                            baseFont: ChatStyle.baseFont,
+                            textColor: ChatStyle.baseColor,
+                            lineSpacing: 0
+                        )
+                    } else if let activityText, !activityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // Show activity status only if no message text yet
+                        ChatActivityStatusView(text: activityText)
+                            .padding(.vertical, 2)
+                    }
                 }
                 if !message.images.isEmpty {
                     let maxSide: CGFloat = message.images.count > 1 ? 200 : 260
@@ -1747,7 +1760,6 @@ private struct ChatMessageRow: View {
     }
 
     private func startEditing() {
-        guard message.role == .user else { return }
         draftText = message.text
         isEditing = true
     }
@@ -1758,7 +1770,6 @@ private struct ChatMessageRow: View {
     }
 
     private func saveEditing() {
-        guard message.role == .user else { return }
         store.editChatMessageAndResend(messageId: message.id, text: draftText)
         isEditing = false
     }
@@ -1782,11 +1793,35 @@ struct MarkdownText: View {
         // 1. NEWLINE HACK
         // Markdown swallows single newlines. We replace them with "  \n" (Hard Break).
         // We protect double newlines (\n\n) which act as paragraph breaks.
-        let textWithHardBreaks = content
-            .replacingOccurrences(of: "\r\n", with: "\n") // normalize CRLF
+        // ALSO protect markdown tables from the hard break conversion!
+
+        var textWithHardBreaks = content.replacingOccurrences(of: "\r\n", with: "\n") // normalize CRLF
+
+        // Protect tables first
+        let tablePattern = #"(?m)(^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$\n(^\s*\|.*\|\s*$\n?)*)"#
+        var tableProtections: [String: String] = [:]
+        if let tableRegex = try? NSRegularExpression(pattern: tablePattern) {
+            let matches = tableRegex.matches(in: textWithHardBreaks, range: NSRange(textWithHardBreaks.startIndex..., in: textWithHardBreaks))
+            for (index, match) in matches.enumerated().reversed() {
+                if let range = Range(match.range, in: textWithHardBreaks) {
+                    let placeholder = "§§TABLE\(index)§§"
+                    let tableContent = String(textWithHardBreaks[range])
+                    tableProtections[placeholder] = tableContent
+                    textWithHardBreaks.replaceSubrange(range, with: placeholder)
+                }
+            }
+        }
+
+        // Now apply hard breaks
+        textWithHardBreaks = textWithHardBreaks
             .replacingOccurrences(of: "\n\n", with: "§§PARAGRAPH§§") // protect paragraphs
             .replacingOccurrences(of: "\n", with: "  \n") // force hard break on single lines
             .replacingOccurrences(of: "§§PARAGRAPH§§", with: "\n\n") // restore paragraphs
+
+        // Restore tables
+        for (placeholder, tableContent) in tableProtections {
+            textWithHardBreaks = textWithHardBreaks.replacingOccurrences(of: placeholder, with: tableContent)
+        }
 
         // 2. PARSE MARKDOWN
         // We assume generic Markdown syntax.
@@ -1827,7 +1862,7 @@ struct MarkdownText: View {
 }
 
 private enum ChatStyle {
-    // ChatGPT-ish defaults
+    // Chat-style defaults
     static let basePointSize: CGFloat = 15.5
     static let baseFont: NSFont = .systemFont(ofSize: basePointSize, weight: .regular)
     static let baseColor: NSColor = .labelColor
@@ -1855,6 +1890,83 @@ private enum ChatStyle {
     static let timestampFont: Font = .system(size: 11, weight: .regular)
 }
 
+private class CodeBlockTextView: NSTextView {
+    override func drawBackground(in rect: NSRect) {
+        // DON'T draw any background - keep it transparent
+        // (Remove the code that was filling with bgColor)
+        
+        guard let textStorage = self.textStorage else { return }
+        guard let layoutManager = self.layoutManager else { return }
+        guard let textContainer = self.textContainer else { return }
+        
+        // No background fill - just draw code block rectangles directly
+        
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        let containerOrigin = textContainerOrigin
+        
+        // Find all code block ranges using our custom marker attribute
+        var codeBlockInfo: [(range: NSRange, color: NSColor)] = []
+        
+        textStorage.enumerateAttribute(.codeBlockMarker, in: fullRange, options: []) { value, range, _ in
+            if let bgColor = value as? NSColor {
+                codeBlockInfo.append((range: range, color: bgColor))
+            }
+        }
+        
+        // Group consecutive code block ranges
+        var mergedBlocks: [(range: NSRange, color: NSColor)] = []
+        for block in codeBlockInfo {
+            if let last = mergedBlocks.last,
+               NSMaxRange(last.range) >= block.range.location {
+                let unionRange = NSUnionRange(last.range, block.range)
+                mergedBlocks[mergedBlocks.count - 1] = (range: unionRange, color: block.color)
+            } else {
+                mergedBlocks.append(block)
+            }
+        }
+        
+        // Draw rounded rectangle for each code block
+        for block in mergedBlocks {
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: block.range, actualCharacterRange: nil)
+            
+            // Get all line fragment rects for this glyph range
+            var rects: [CGRect] = []
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { lineRect, usedRect, textContainer, glyphRange, stop in
+                rects.append(usedRect)
+            }
+            
+            guard !rects.isEmpty else { continue }
+            
+            // Calculate the union of all line rects
+            var boundingRect = rects[0]
+            for rect in rects.dropFirst() {
+                boundingRect = boundingRect.union(rect)
+            }
+            
+            // Adjust for container origin and add padding
+            let padding: CGFloat = 12
+            let verticalPadding: CGFloat = 8
+            
+            boundingRect.origin.x += containerOrigin.x - padding
+            boundingRect.origin.y += containerOrigin.y - verticalPadding
+            boundingRect.size.width += padding * 2
+            boundingRect.size.height += verticalPadding * 2
+            
+            // Ensure the rect is within the visible area
+            boundingRect = boundingRect.intersection(self.bounds)
+            
+            // Draw the rounded rectangle
+            let path = NSBezierPath(roundedRect: boundingRect, xRadius: 8, yRadius: 8)
+            block.color.setFill()
+            path.fill()
+        }
+    }
+    
+    override func setNeedsDisplay(_ invalidRect: NSRect) {
+        super.setNeedsDisplay(self.visibleRect)
+    }
+}
+
 private struct ChatRichTextView: NSViewRepresentable {
     let attributedText: NSAttributedString
     let baseFont: NSFont
@@ -1871,7 +1983,7 @@ private struct ChatRichTextView: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
 
-        let textView = NSTextView()
+        let textView = CodeBlockTextView(frame: .zero)
         textView.delegate = context.coordinator
         textView.drawsBackground = false
         textView.isEditable = false
@@ -1982,6 +2094,7 @@ private struct ChatRichTextView: NSViewRepresentable {
         styleUnorderedLists(in: mutable)
         styleOrderedLists(in: mutable)
         styleBlockquotes(in: mutable, baseFont: baseFont)
+        styleCodeFences(in: mutable, baseFont: baseFont, textColor: textColor)
         styleInlineCode(in: mutable, baseFont: baseFont)
 
         return mutable
@@ -2433,6 +2546,17 @@ struct PasteAwareTextField: NSViewRepresentable {
             handlePaste(sender) { super.pasteAsRichText($0) }
         }
 
+        override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+            switch item.action {
+            case #selector(paste(_:)),
+                 #selector(pasteAsPlainText(_:)),
+                 #selector(pasteAsRichText(_:)):
+                return true
+            default:
+                return super.validateUserInterfaceItem(item)
+            }
+        }
+
         override func didChangeText() {
             super.didChangeText()
             needsDisplay = true
@@ -2497,11 +2621,6 @@ struct SettingsPanelView: View {
             TextField("Name", text: userNameBinding)
                 .textFieldStyle(.roundedBorder)
 
-            Text("API Key")
-                .font(.headline)
-            SecureField("sk-...", text: apiKeyBinding)
-                .textFieldStyle(.roundedBorder)
-
             Text("Voice")
                 .font(.headline)
             Picker("Voice", selection: voiceBinding) {
@@ -2511,7 +2630,7 @@ struct SettingsPanelView: View {
             }
             .pickerStyle(.menu)
             .frame(maxWidth: 220)
-            Text("Used for spoken replies after voice input.")
+            Text("Stored preference; spoken replies are disabled.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Toggle("Always listening (wake word: \"Astra\")", isOn: alwaysListeningBinding)
@@ -2601,14 +2720,6 @@ struct SettingsPanelView: View {
         })
     }
 
-    private var apiKeyBinding: Binding<String> {
-        Binding(get: {
-            store.doc.chatSettings.apiKey
-        }, set: { newValue in
-            store.updateChatSettings { $0.apiKey = newValue }
-        })
-    }
-
     private var userNameBinding: Binding<String> {
         Binding(get: {
             store.doc.chatSettings.userName
@@ -2662,37 +2773,34 @@ struct SettingsPanelView: View {
     }
 }
 
-struct PersonalityPanelView: View {
+struct NotesPanelView: View {
     @EnvironmentObject var store: BoardStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Instructions")
+            Text("Notes")
                 .font(.headline)
             ZStack(alignment: .topLeading) {
-                TextEditor(text: personalityBinding)
+                TextEditor(text: notesBinding)
                     .frame(minHeight: 140)
                     .padding(6)
                     .overlay(RoundedRectangle(cornerRadius: 8)
                         .stroke(Color(NSColor.separatorColor), lineWidth: 1))
-                if personalityBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("e.g. Be concise and use bullet points.")
+                if notesBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Add a note to keep with this board.")
                         .foregroundColor(.secondary)
                         .padding(10)
                 }
             }
-            Text("Used as the system prompt for the model.")
-                .font(.caption)
-                .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var personalityBinding: Binding<String> {
+    private var notesBinding: Binding<String> {
         Binding(get: {
-            store.doc.chatSettings.personality
+            store.doc.chatSettings.notes
         }, set: { newValue in
-            store.updateChatSettings { $0.personality = newValue }
+            store.updateChatSettings { $0.notes = newValue }
         })
     }
 }
@@ -2926,17 +3034,85 @@ struct MemoriesPanelView: View {
         )
     }
 
+    private var memories: [Memory] {
+        store.doc.memories
+    }
+
+    private var filteredMemories: [Memory] {
+        memories.filter { $0.category == selectedCategory }
+    }
+
+    private var matchSummary: String {
+        let trimmed = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "Type to search" }
+        if findMatches.isEmpty { return "No matches" }
+        return "\(findIndex + 1) of \(findMatches.count)"
+    }
+
+    @ViewBuilder
+    private var emptyStateView: some View {
+        Spacer()
+        Text("No Memories")
+            .font(.headline)
+            .foregroundColor(.secondary)
+        Text("Memories appear here when saved.")
+            .font(.subheadline)
+            .foregroundColor(.secondary)
+        Spacer()
+    }
+
+    @ViewBuilder
+    private func memoriesList(proxy: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            FindBarView(
+                isVisible: $isFindVisible,
+                query: $findQuery,
+                matchSummary: matchSummary,
+                onNext: { pendingFindCommand = .next },
+                onPrev: { pendingFindCommand = .prev },
+                onClose: { pendingFindCommand = .close }
+            )
+
+            if filteredMemories.isEmpty {
+                emptyStateView
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(filteredMemories.indices, id: \.self) { idx in
+                            MemoryRowView(memory: filteredMemories[idx],
+                                          rowId: idx,
+                                          showsDivider: idx != filteredMemories.count - 1)
+                        }
+                    }
+                }
+                .onChange(of: filteredMemories.count) { _ in
+                    rebuildFindMatches(filteredMemories)
+                }
+            }
+        }
+        // ✅ Find mechanics now attach to a REAL view (the VStack)
+        .onAppear {
+            if !hasInitializedCategory {
+                if !memories.contains(where: { $0.category == selectedCategory }),
+                   let firstCategory = MemoryCategory.allCases.first(where: { category in
+                       memories.contains(where: { $0.category == category })
+                   }) {
+                    selectedCategory = firstCategory
+                }
+                hasInitializedCategory = true
+            }
+            rebuildFindMatches(filteredMemories)
+        }
+        .onChange(of: findQuery) { _ in rebuildFindMatches(filteredMemories) }
+        .onChange(of: selectedCategory) { _ in rebuildFindMatches(filteredMemories) }
+        .onChange(of: pendingFindCommand) { cmd in
+            guard let cmd else { return }
+            applyFindCommand(cmd, memories: filteredMemories, proxy: proxy)
+            pendingFindCommand = nil
+        }
+    }
+
     var body: some View {
-        let memories = store.doc.memories
-        let filteredMemories = memories.filter { $0.category == selectedCategory }
-        let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let matchSummary: String = {
-            if q.isEmpty { return "Type to search" }
-            if findMatches.isEmpty { return "No matches" }
-            return "\(findIndex + 1) of \(findMatches.count)"
-        }()
-
         ZStack {
             ChatPanelBackground()
                 .allowsHitTesting(false)
@@ -2950,91 +3126,7 @@ struct MemoriesPanelView: View {
                 .pickerStyle(.segmented)
 
                 ScrollViewReader { proxy in
-                    VStack(alignment: .leading, spacing: 10) {
-                        FindBarView(
-                            isVisible: $isFindVisible,
-                            query: $findQuery,
-                            matchSummary: matchSummary,
-                            onNext: { pendingFindCommand = .next },
-                            onPrev: { pendingFindCommand = .prev },
-                            onClose: { pendingFindCommand = .close }
-                        )
-
-                        if filteredMemories.isEmpty {
-                            Spacer()
-                            Text("No Memories")
-                                .font(.headline)
-                                .foregroundColor(.secondary)
-                            Text("Memories saved by the model will show up here.")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        } else {
-                            ScrollView {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(Array(filteredMemories.enumerated()), id: \.element.id) { idx, mem in
-                                        HStack(alignment: .top, spacing: 10) {
-                                            VStack(alignment: .leading, spacing: 8) {
-                                                Text(mem.text)
-                                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                                    .textSelection(.enabled)
-                                                
-                                                if let imageRef = mem.image, let url = store.imageURL(for: imageRef) {
-                                                    AsyncImage(url: url) { image in
-                                                        image.resizable()
-                                                             .aspectRatio(contentMode: .fit)
-                                                             .cornerRadius(4)
-                                                    } placeholder: {
-                                                        ProgressView()
-                                                    }
-                                                    .frame(maxWidth: 200, maxHeight: 200)
-                                                }
-                                            }
-                                            .padding(.vertical, 10)
-                                            Button {
-                                                store.deleteMemory(id: mem.id)
-                                            } label: {
-                                                Image(systemName: "trash")
-                                            }
-                                            .buttonStyle(.plain)
-                                            .foregroundColor(.red)
-                                            .help("Delete memory")
-                                            .padding(.top, 8)
-                                        }
-                                        .padding(.horizontal, 12)
-                                        .id(mem.id)
-
-                                        if idx != filteredMemories.count - 1 {
-                                            Divider()
-                                        }
-                                    }
-                                }
-                            }
-                            .onChange(of: filteredMemories.count) { _ in
-                                rebuildFindMatches(filteredMemories)
-                            }
-                        }
-                    }
-                    // ✅ Find mechanics now attach to a REAL view (the VStack)
-                    .onAppear {
-                        if !hasInitializedCategory {
-                            if !memories.contains(where: { $0.category == selectedCategory }),
-                               let firstCategory = MemoryCategory.allCases.first(where: { category in
-                                   memories.contains(where: { $0.category == category })
-                               }) {
-                                selectedCategory = firstCategory
-                            }
-                            hasInitializedCategory = true
-                        }
-                        rebuildFindMatches(filteredMemories)
-                    }
-                    .onChange(of: findQuery) { _ in rebuildFindMatches(filteredMemories) }
-                    .onChange(of: selectedCategory) { _ in rebuildFindMatches(filteredMemories) }
-                    .onChange(of: pendingFindCommand) { cmd in
-                        guard let cmd else { return }
-                        applyFindCommand(cmd, memories: filteredMemories, proxy: proxy)
-                        pendingFindCommand = nil
-                    }
+                    memoriesList(proxy: proxy)
                 }
             }
             .padding(12)
@@ -3045,6 +3137,50 @@ struct MemoriesPanelView: View {
         .onTapGesture { panelFocused = true }
         .focusedValue(\.findTarget, panelFocused ? findTarget : nil)
         .onExitCommand { pendingFindCommand = .close }
+    }
+}
+
+private struct MemoryRowView: View {
+    @EnvironmentObject var store: BoardStore
+    let memory: Memory
+    let rowId: Int
+    let showsDivider: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(memory.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+
+                if let imageRef = memory.image, let url = store.imageURL(for: imageRef) {
+                    AsyncImage(url: url) { image in
+                        image.resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .cornerRadius(4)
+                    } placeholder: {
+                        ProgressView()
+                    }
+                    .frame(maxWidth: 200, maxHeight: 200)
+                }
+            }
+            .padding(.vertical, 10)
+            Button {
+                store.deleteMemory(id: memory.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.red)
+            .help("Delete memory")
+            .padding(.top, 8)
+        }
+        .padding(.horizontal, 12)
+        .id(rowId)
+
+        if showsDivider {
+            Divider()
+        }
     }
 }
 
@@ -3308,6 +3444,28 @@ struct StylePanelView: View {
                 }
             }
         )
+        
+        let isTriangle: Bool = {
+            guard case .shape(let kind) = entry.data else { return false }
+            switch kind {
+            case .triangleUp, .triangleDown, .triangleLeft, .triangleRight:
+                return true
+            default:
+                return false
+            }
+        }()
+
+        let cornerRadiusMax = isTriangle ? 50.0 : 80.0
+        let cornerRadiusRange: ClosedRange<Double> = 0...cornerRadiusMax
+        
+        let cornerRadius = Binding<Double>(
+            get: { store.shapeStyle(for: entry).cornerRadius },
+            set: { newValue in
+                store.updateSelectedShapeStyles { style in
+                    style.cornerRadius = min(max(0, newValue), cornerRadiusMax)
+                }
+            }
+        )
 
         return VStack(alignment: .leading, spacing: 12) {
             Text("Fill")
@@ -3322,6 +3480,12 @@ struct StylePanelView: View {
             colorRow(title: "Color", selection: borderColor)
             opacityRow(title: "Opacity", value: borderOpacity)
             thicknessRow(title: "Thickness", value: borderWidth, range: 0...20)
+            
+            Divider()
+
+            Text("Corners")
+                .font(.headline)
+            thicknessRow(title: "Radius", value: cornerRadius, range: cornerRadiusRange)
         }
     }
 
@@ -3492,19 +3656,18 @@ private func replaceHorizontalRules(in mutable: NSMutableAttributedString,
 }
 
 private func replaceMarkdownTables(in mutable: NSMutableAttributedString,
-                                  baseFont: NSFont,
-                                  textColor: NSColor)
+                                   baseFont: NSFont,
+                                   textColor: NSColor)
 {
     let ns = mutable.string as NSString
     let full = NSRange(location: 0, length: ns.length)
 
-    // Markdown table block:
-    // | a | b |
-    // |---|---|
-    // | 1 | 2 |
-    let pattern = #"(?m)(^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$\n(^\s*\|.*\|\s*$\n?)*)"#    
+    // Matches a full Markdown table block (header + separator + rows)
+    // The pattern is multiline, so we only match blocks that are not broken by hard line breaks.
+    let pattern = #"(?m)(^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$\n(^\s*\|.*\|\s*$\n?)*)"#
     guard let re = try? NSRegularExpression(pattern: pattern) else { return }
 
+    // Helper to split a row into its cells
     func parseRow(_ line: String) -> [String] {
         var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.hasPrefix("|") { t.removeFirst() }
@@ -3513,11 +3676,8 @@ private func replaceMarkdownTables(in mutable: NSMutableAttributedString,
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    let mono = NSFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
-    let attrs: [NSAttributedString.Key: Any] = [
-        .font: mono,
-        .foregroundColor: textColor
-    ]
+    // Use a slightly smaller monospaced font for tables
+    let mono = NSFont.monospacedSystemFont(ofSize: max(11, baseFont.pointSize - 2), weight: .regular)
 
     for match in re.matches(in: mutable.string, range: full).reversed() {
         let block = ns.substring(with: match.range)
@@ -3528,43 +3688,61 @@ private func replaceMarkdownTables(in mutable: NSMutableAttributedString,
         let bodyRows = lines.dropFirst(2).map(parseRow)
         let rows = [header] + bodyRows
 
+        // Determine number of columns
         let colCount = rows.map(\.count).max() ?? 0
         guard colCount > 0 else { continue }
 
-        // Column widths
+        // Calculate the width of each column in *character* units
         var widths = Array(repeating: 0, count: colCount)
+        let sampleChar = "M" as NSString
+        let charWidth = sampleChar.size(withAttributes: [.font: mono]).width
+
         for row in rows {
             for c in 0..<colCount {
                 let cell = (c < row.count) ? row[c] : ""
-                widths[c] = max(widths[c], cell.count)
+                let cellWidth = (cell as NSString).size(withAttributes: [.font: mono]).width
+                let charCount = Int(ceil(cellWidth / charWidth))
+                widths[c] = max(widths[c], max(charCount, 3))   // minimum 3 chars wide
             }
         }
 
-        func pad(_ s: String, to w: Int) -> String {
-            if s.count >= w { return s }
-            return s + String(repeating: " ", count: w - s.count)
+        // Helper to pad a string to a given character count
+        func pad(_ s: String, to charCount: Int) -> String {
+            let str = s as NSString
+            let currentChars = Int(ceil(str.size(withAttributes: [.font: mono]).width / charWidth))
+            let padding = max(0, charCount - currentChars)
+            return s + String(repeating: " ", count: padding)
         }
 
+        // Helper to build a border line
         func border(left: String, mid: String, right: String, fill: String = "─") -> String {
             left + widths.map { String(repeating: fill, count: $0 + 2) }.joined(separator: mid) + right
         }
 
+        // Helper to build a row line
         func rowLine(_ row: [String]) -> String {
             "│" + (0..<colCount).map { c in
                 " " + pad(c < row.count ? row[c] : "", to: widths[c]) + " "
             }.joined(separator: "│") + "│"
         }
 
-        var out = ""
-        out += border(left: "┌", mid: "┬", right: "┐") + "\n"
-        out += rowLine(header) + "\n"
-        out += border(left: "├", mid: "┼", right: "┤") + "\n"
-        for r in bodyRows {
-            out += rowLine(r) + "\n"
-        }
-        out += border(left: "└", mid: "┴", right: "┘") + "\n"
+        // Build the final table string
+        let result = NSMutableAttributedString()
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: mono,
+            .foregroundColor: textColor
+        ]
 
-        mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: out, attributes: attrs))
+        result.append(NSAttributedString(string: border(left: "┌", mid: "┬", right: "┐") + "\n", attributes: attrs))
+        result.append(NSAttributedString(string: rowLine(header) + "\n", attributes: attrs))
+        result.append(NSAttributedString(string: border(left: "├", mid: "┼", right: "┤") + "\n", attributes: attrs))
+        for r in bodyRows {
+            result.append(NSAttributedString(string: rowLine(r) + "\n", attributes: attrs))
+        }
+        result.append(NSAttributedString(string: border(left: "└", mid: "┴", right: "┘") + "\n", attributes: attrs))
+
+        // Replace the original Markdown table block with the nicely formatted one
+        mutable.replaceCharacters(in: match.range, with: result)
     }
 }
 
@@ -3641,14 +3819,103 @@ private func styleBlockquotes(in mutable: NSMutableAttributedString,
     }
 }
 
+private func styleCodeFences(in mutable: NSMutableAttributedString,
+                             baseFont: NSFont,
+                             textColor: NSColor)
+{
+    let s = mutable.string
+    
+    // Updated regex to handle code fences more robustly:
+    // - Captures optional language identifier (with optional whitespace)
+    // - Uses non-greedy matching for content
+    // - Handles both \n and \r\n line endings
+    // - Works with or without language identifier
+    let pattern = #"```[ \t]*(\w+)?[ \t]*[\r\n]+(.*?)[\r\n]+```"#
+    
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
+        print("❌ Failed to create regex for code fences")
+        return
+    }
+    
+    let matches = regex.matches(in: s, options: [], range: NSRange(location: 0, length: s.utf16.count))
+    
+    // Process matches in reverse to maintain valid indices
+    for match in matches.reversed() {
+        // Extract language (optional)
+        let langRange = match.range(at: 1)
+        let lang = (langRange.location != NSNotFound) ? (s as NSString).substring(with: langRange) : ""
+        
+        // Extract code content
+        let contentRange = match.range(at: 2)
+        guard contentRange.location != NSNotFound else { continue }
+        let content = (s as NSString).substring(with: contentRange)
+        
+        // Create styled replacement
+        let result = NSMutableAttributedString()
+        
+        // Add language label if present
+        if !lang.isEmpty {
+            let labelFont = NSFont.monospacedSystemFont(ofSize: 10, weight: .medium)
+            let labelColor = NSColor.secondaryLabelColor
+            let label = NSAttributedString(string: lang + "\n", attributes: [
+                .font: labelFont,
+                .foregroundColor: labelColor
+            ])
+            result.append(label)
+        }
+        
+        // Add code content
+        let codeFont = NSFont.monospacedSystemFont(ofSize: max(12, baseFont.pointSize - 2), weight: .regular)
+        let codeFg = NSColor.labelColor
+        let codeBg = NSColor.controlBackgroundColor.withAlphaComponent(0.85)
+        
+        let codeText = NSAttributedString(string: content, attributes: [
+            .font: codeFont,
+            .foregroundColor: codeFg,
+            .backgroundColor: codeBg
+        ])
+        result.append(codeText)
+        
+        // Apply paragraph style with insets
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.firstLineHeadIndent = 12
+        paragraphStyle.headIndent = 12
+        paragraphStyle.tailIndent = -12
+        paragraphStyle.paragraphSpacingBefore = 4
+        paragraphStyle.paragraphSpacing = 4
+        paragraphStyle.lineSpacing = 1
+        
+        let fullRange = NSRange(location: 0, length: result.length)
+        result.addAttribute(.paragraphStyle, value: paragraphStyle, range: fullRange)
+        
+        // Replace the entire fence (including markers) with the styled content
+        mutable.replaceCharacters(in: match.range, with: result)
+    }
+}
+
 private func styleInlineCode(in mutable: NSMutableAttributedString,
                              baseFont: NSFont)
 {
-    // We'll parse single-backtick pairs. We ignore triple backticks/code fences by only matching
-    // runs that do NOT contain newlines.
     let s = mutable.string
+    let full = NSRange(location: 0, length: mutable.length)
+    
+    // First, identify all ranges that have code block marker
+    var codeBlockRanges: [NSRange] = []
+    mutable.enumerateAttribute(.codeBlockMarker, in: full, options: []) { value, range, _ in
+        if value != nil {
+            codeBlockRanges.append(range)
+        }
+    }
+    
+    // Helper to check if a position is inside a code block
+    func isInsideCodeBlock(_ position: Int) -> Bool {
+        return codeBlockRanges.contains { range in
+            position >= range.location && position < NSMaxRange(range)
+        }
+    }
+    
+    // Parse single-backtick pairs, skipping those inside code blocks
     var pairs: [(start: Int, end: Int)] = []
-
     var i = s.startIndex
     var open: Int? = nil
 
@@ -3659,13 +3926,19 @@ private func styleInlineCode(in mutable: NSMutableAttributedString,
     while i < s.endIndex {
         if s[i] == "`" {
             let pos = offset(of: i)
+            
+            // Skip if this backtick is inside a code block
+            if isInsideCodeBlock(pos) {
+                i = s.index(after: i)
+                open = nil
+                continue
+            }
 
-            // Skip ``` fences (two more backticks immediately)
+            // Skip ``` fences
             let next1 = s.index(after: i)
             if next1 < s.endIndex, s[next1] == "`" {
                 let next2 = s.index(after: next1)
                 if next2 < s.endIndex, s[next2] == "`" {
-                    // Jump past the fence marker
                     i = s.index(after: next2)
                     open = nil
                     continue
@@ -3673,10 +3946,9 @@ private func styleInlineCode(in mutable: NSMutableAttributedString,
             }
 
             if let o = open {
-                // Only treat as inline code if it doesn't include a newline
                 let startIdx = s.index(s.startIndex, offsetBy: o + 1)
                 let endIdx = s.index(s.startIndex, offsetBy: pos)
-                if !s[startIdx..<endIdx].contains("\n") {
+                if !s[startIdx..<endIdx].contains("\n") && !isInsideCodeBlock(o) {
                     pairs.append((start: o, end: pos))
                 }
                 open = nil
@@ -3691,18 +3963,15 @@ private func styleInlineCode(in mutable: NSMutableAttributedString,
     let bg = NSColor.controlBackgroundColor.withAlphaComponent(0.6)
     let fg = NSColor.secondaryLabelColor
 
-    // Replace from the end so indices stay valid
     for p in pairs.reversed() {
         let contentRange = NSRange(location: p.start + 1, length: p.end - p.start - 1)
 
-        // Style the content
         mutable.addAttributes([
             .font: mono,
             .foregroundColor: fg,
             .backgroundColor: bg
         ], range: contentRange)
 
-        // Remove closing ` then opening ` (reverse order)
         mutable.deleteCharacters(in: NSRange(location: p.end, length: 1))
         mutable.deleteCharacters(in: NSRange(location: p.start, length: 1))
     }

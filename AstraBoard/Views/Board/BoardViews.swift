@@ -9,10 +9,10 @@ struct WorkspaceModeSwitcher: View {
 
     var body: some View {
         Menu {
-            Button { mode = .canvas } label: { Label("Canvas Mode", systemImage: "square.grid.2x2") }
-            Button { mode = .notes }  label: { Label("Notes Mode", systemImage: "doc.text") }
+            Button { mode = .canvas } label: { Label("Canvas", systemImage: "square.grid.2x2") }
+            Button { mode = .notes }  label: { Label("Notes", systemImage: "text.page") }
         } label: {
-            Image(systemName: "line.3.horizontal")
+            Image(systemName: mode == .canvas ? "square.grid.2x2" : "text.page")
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 28, height: 28)
                 .background(
@@ -77,12 +77,17 @@ struct NotesWorkspaceView: View {
     }
 
     private var collapsedSidebar: some View {
-        VStack {
+        VStack(spacing: 10) {
+            WorkspaceModeSwitcher(mode: Binding(
+                get: { store.doc.ui.workspaceMode },
+                set: { store.doc.ui.workspaceMode = $0 }
+            ))
+            .padding(.top, 10)
+
             Button { sidebarCollapsed.wrappedValue = false } label: {
                 chromeIcon("line.3.horizontal")
             }
             .buttonStyle(.plain)
-            .padding(.top, 10)
 
             Spacer()
         }
@@ -91,15 +96,15 @@ struct NotesWorkspaceView: View {
     }
 
     private var stackPicker: some View {
-        let stacks = store.doc.notes.stacks
+        let areas = store.doc.notes.areas
         return Group {
-            if stacks.isEmpty {
-                pill("No Stacks", selected: false)
+            if areas.isEmpty {
+                pill("No Areas", selected: false)
             } else {
                 Menu {
-                    ForEach(stacks) { s in Button(s.title) { select(stackID: s.id) } }
+                    ForEach(areas) { area in Button(area.title) { select(areaID: area.id) } }
                 } label: {
-                    pill(selectedStack()?.title ?? "Stack", selected: true, showsChevron: true)
+                    pill(selectedArea()?.title ?? "Area", selected: true, showsChevron: true)
                 }
                 .menuStyle(BorderlessButtonMenuStyle())
             }
@@ -107,7 +112,7 @@ struct NotesWorkspaceView: View {
     }
 
     private var notebookPicker: some View {
-        let notebooks = selectedStack()?.notebooks ?? []
+        let notebooks = selectedNotebookContainer() ?? []
         return Group {
             if notebooks.isEmpty {
                 pill("No Notebooks", selected: false)
@@ -153,7 +158,15 @@ struct NotesWorkspaceView: View {
     private var editor: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
+                if let note = selectedNote(),
+                   let parts = notePathParts(noteID: note.id) {
+                    notePathView(parts)
+                        .padding(.leading, 14)
+                        .padding(.top, 10)
+                }
+
                 Spacer()
+
                 if let note = selectedNote() {
                     Text(metadataString(for: note))
                         .font(.caption)
@@ -163,28 +176,50 @@ struct NotesWorkspaceView: View {
                 }
             }
 
-            if selectedNote() == nil {
+            if let note = selectedNote() {
+                if note.isLocked && !store.isNoteUnlockedInSession(note.id) {
+                    VStack {
+                        Spacer()
+                        VStack(spacing: 10) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundColor(.secondary)
+
+                            Text("This note is locked")
+                                .foregroundColor(.secondary)
+
+                            Button("Unlock with Touch ID…") {
+                                Task { _ = await store.ensureUnlockedForViewing(noteID: note.id) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Spacer()
+                    }
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            TextField("Title", text: bindingForSelectedNoteTitle())
+                                .font(.system(size: 34, weight: .bold))
+                                .textFieldStyle(.plain)
+
+                            NoteBodyTextView(
+                                text: bindingForSelectedNoteBody(),
+                                store: store,
+                                font: NSFont.systemFont(ofSize: 16),
+                                textColor: NSColor.labelColor
+                            )
+                            .frame(minHeight: 420)
+                        }
+                        .padding(.horizontal, 28)
+                        .padding(.vertical, 22)
+                        .frame(maxWidth: 860, alignment: .leading)
+                    }
+                }
+            } else {
                 VStack {
                     Spacer()
                     Text("No note selected").foregroundColor(.secondary)
                     Spacer()
-                }
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        TextField("Title", text: bindingForSelectedNoteTitle())
-                            .font(.system(size: 34, weight: .bold))
-                            .textFieldStyle(.plain)
-
-                        TextEditor(text: bindingForSelectedNoteBody())
-                            .font(.system(size: 16))
-                            .frame(minHeight: 420)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.clear)
-                    }
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 22)
-                    .frame(maxWidth: 860, alignment: .leading)
                 }
             }
         }
@@ -237,16 +272,123 @@ struct NotesWorkspaceView: View {
         return "Created \(df.string(from: created)) · Edited \(df.string(from: edited))"
     }
 
+    private struct NotePathPart: Identifiable {
+        let id = UUID()
+        let title: String
+        let systemImage: String
+    }
+
+    private func notePathParts(noteID: UUID) -> [NotePathPart]? {
+        func trimmed(_ value: String) -> String? {
+            let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return cleaned.isEmpty ? nil : cleaned
+        }
+
+        for area in store.doc.notes.areas {
+            if area.notes.contains(where: { $0.id == noteID }) {
+                return trimmed(area.title).map { [NotePathPart(title: $0, systemImage: "rectangle.3.group")] }
+            }
+
+            for notebook in area.notebooks {
+                if notebook.notes.contains(where: { $0.id == noteID }) {
+                    guard let areaTitle = trimmed(area.title),
+                          let notebookTitle = trimmed(notebook.title) else { return nil }
+                    return [
+                        NotePathPart(title: areaTitle, systemImage: "rectangle.3.group"),
+                        NotePathPart(title: notebookTitle, systemImage: "book.closed")
+                    ]
+                }
+                for section in notebook.sections where section.notes.contains(where: { $0.id == noteID }) {
+                    guard let areaTitle = trimmed(area.title),
+                          let notebookTitle = trimmed(notebook.title),
+                          let sectionTitle = trimmed(section.title) else { return nil }
+                    return [
+                        NotePathPart(title: areaTitle, systemImage: "rectangle.3.group"),
+                        NotePathPart(title: notebookTitle, systemImage: "book.closed"),
+                        NotePathPart(title: sectionTitle, systemImage: "bookmark")
+                    ]
+                }
+            }
+
+            for stack in area.stacks {
+                if stack.notes.contains(where: { $0.id == noteID }) {
+                    guard let areaTitle = trimmed(area.title),
+                          let stackTitle = trimmed(stack.title) else { return nil }
+                    return [
+                        NotePathPart(title: areaTitle, systemImage: "rectangle.3.group"),
+                        NotePathPart(title: stackTitle, systemImage: "square.stack.3d.up")
+                    ]
+                }
+                for notebook in stack.notebooks {
+                    if notebook.notes.contains(where: { $0.id == noteID }) {
+                        guard let areaTitle = trimmed(area.title),
+                              let stackTitle = trimmed(stack.title),
+                              let notebookTitle = trimmed(notebook.title) else { return nil }
+                        return [
+                            NotePathPart(title: areaTitle, systemImage: "rectangle.3.group"),
+                            NotePathPart(title: stackTitle, systemImage: "square.stack.3d.up"),
+                            NotePathPart(title: notebookTitle, systemImage: "book.closed")
+                        ]
+                    }
+                    for section in notebook.sections where section.notes.contains(where: { $0.id == noteID }) {
+                        guard let areaTitle = trimmed(area.title),
+                              let stackTitle = trimmed(stack.title),
+                              let notebookTitle = trimmed(notebook.title),
+                              let sectionTitle = trimmed(section.title) else { return nil }
+                        return [
+                            NotePathPart(title: areaTitle, systemImage: "rectangle.3.group"),
+                            NotePathPart(title: stackTitle, systemImage: "square.stack.3d.up"),
+                            NotePathPart(title: notebookTitle, systemImage: "book.closed"),
+                            NotePathPart(title: sectionTitle, systemImage: "bookmark")
+                        ]
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private func notePathView(_ parts: [NotePathPart]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(parts.enumerated()), id: \.element.id) { index, part in
+                HStack(spacing: 4) {
+                    Image(systemName: part.systemImage)
+                    Text(part.title)
+                }
+                if index < parts.count - 1 {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
+        .lineLimit(1)
+    }
+
     // ---- selection helpers ----
 
+    private func selectedArea() -> NoteArea? {
+        guard let id = store.doc.notes.selection.areaID else { return store.doc.notes.areas.first }
+        return store.doc.notes.areas.first(where: { $0.id == id }) ?? store.doc.notes.areas.first
+    }
+
     private func selectedStack() -> NoteStack? {
-        guard let id = store.doc.notes.selection.stackID else { return store.doc.notes.stacks.first }
-        return store.doc.notes.stacks.first(where: { $0.id == id }) ?? store.doc.notes.stacks.first
+        guard let area = selectedArea() else { return nil }
+        guard let id = store.doc.notes.selection.stackID else { return area.stacks.first }
+        return area.stacks.first(where: { $0.id == id }) ?? area.stacks.first
+    }
+
+    private func selectedNotebookContainer() -> [NoteNotebook]? {
+        if store.doc.notes.selection.stackID != nil {
+            return selectedStack()?.notebooks
+        }
+        return selectedArea()?.notebooks
     }
 
     private func selectedNotebook() -> NoteNotebook? {
-        guard let stack = selectedStack() else { return nil }
-        let notebooks = stack.notebooks
+        guard let notebooks = selectedNotebookContainer() else { return nil }
         guard let id = store.doc.notes.selection.notebookID else { return notebooks.first }
         return notebooks.first(where: { $0.id == id }) ?? notebooks.first
     }
@@ -259,72 +401,133 @@ struct NotesWorkspaceView: View {
     }
 
     private func selectedNote() -> NoteItem? {
-        guard let stack = selectedStack() else { return nil }
+        guard let area = selectedArea() else { return nil }
         let sel = store.doc.notes.selection
 
-        // If a specific note is selected, find it in the right place.
-        if let noteID = sel.noteID {
-            // section note
-            if let nbID = sel.notebookID, let secID = sel.sectionID,
-            let nb = stack.notebooks.first(where: { $0.id == nbID }),
-            let sec = nb.sections.first(where: { $0.id == secID }),
-            let note = sec.notes.first(where: { $0.id == noteID }) {
-                return note
-            }
+        let stack = sel.stackID.flatMap { id in
+            area.stacks.first(where: { $0.id == id })
+        }
 
-            // notebook root note
-            if let nbID = sel.notebookID,
-            let nb = stack.notebooks.first(where: { $0.id == nbID }),
-            let note = nb.notes.first(where: { $0.id == noteID }) {
-                return note
-            }
-
-            // stack root note
-            if let note = stack.notes.first(where: { $0.id == noteID }) {
-                return note
-            }
-
-            // fallback (in case selection got out of sync)
-            for nb in stack.notebooks {
-                if let note = nb.notes.first(where: { $0.id == noteID }) { return note }
-                for sec in nb.sections {
-                    if let note = sec.notes.first(where: { $0.id == noteID }) { return note }
-                }
+        func noteInNotebook(_ nb: NoteNotebook, noteID: UUID) -> NoteItem? {
+            if let note = nb.notes.first(where: { $0.id == noteID }) { return note }
+            for sec in nb.sections {
+                if let note = sec.notes.first(where: { $0.id == noteID }) { return note }
             }
             return nil
         }
 
+        func firstNoteInNotebook(_ nb: NoteNotebook) -> NoteItem? {
+            nb.notes.first ?? nb.sections.first?.notes.first
+        }
+
+        // If a specific note is selected, find it in the right place.
+        if let noteID = sel.noteID {
+            if let stack {
+                // section note (stack)
+                if let nbID = sel.notebookID, let secID = sel.sectionID,
+                   let nb = stack.notebooks.first(where: { $0.id == nbID }),
+                   let sec = nb.sections.first(where: { $0.id == secID }),
+                   let note = sec.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // notebook root note (stack)
+                if let nbID = sel.notebookID,
+                   let nb = stack.notebooks.first(where: { $0.id == nbID }),
+                   let note = nb.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // stack root note
+                if let note = stack.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // fallback (in case selection got out of sync)
+                for nb in stack.notebooks {
+                    if let note = noteInNotebook(nb, noteID: noteID) { return note }
+                }
+                return nil
+            } else {
+                // section note (area)
+                if let nbID = sel.notebookID, let secID = sel.sectionID,
+                   let nb = area.notebooks.first(where: { $0.id == nbID }),
+                   let sec = nb.sections.first(where: { $0.id == secID }),
+                   let note = sec.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // notebook root note (area)
+                if let nbID = sel.notebookID,
+                   let nb = area.notebooks.first(where: { $0.id == nbID }),
+                   let note = nb.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // area root note
+                if let note = area.notes.first(where: { $0.id == noteID }) {
+                    return note
+                }
+
+                // fallback (in case selection got out of sync)
+                for nb in area.notebooks {
+                    if let note = noteInNotebook(nb, noteID: noteID) { return note }
+                }
+                return nil
+            }
+        }
+
         // No note selected yet → pick a sensible default for the current selection scope.
+        if let stack {
+            if let nbID = sel.notebookID, let secID = sel.sectionID,
+               let nb = stack.notebooks.first(where: { $0.id == nbID }),
+               let sec = nb.sections.first(where: { $0.id == secID }) {
+                return sec.notes.first
+            }
+
+            if let nbID = sel.notebookID,
+               let nb = stack.notebooks.first(where: { $0.id == nbID }) {
+                return firstNoteInNotebook(nb)
+            }
+
+            return stack.notes.first ?? stack.notebooks.first.flatMap { firstNoteInNotebook($0) }
+        }
+
         if let nbID = sel.notebookID, let secID = sel.sectionID,
-        let nb = stack.notebooks.first(where: { $0.id == nbID }),
-        let sec = nb.sections.first(where: { $0.id == secID }) {
+           let nb = area.notebooks.first(where: { $0.id == nbID }),
+           let sec = nb.sections.first(where: { $0.id == secID }) {
             return sec.notes.first
         }
 
         if let nbID = sel.notebookID,
-        let nb = stack.notebooks.first(where: { $0.id == nbID }) {
-            return nb.notes.first ?? nb.sections.first?.notes.first
+           let nb = area.notebooks.first(where: { $0.id == nbID }) {
+            return firstNoteInNotebook(nb)
         }
 
-        return stack.notes.first ?? stack.notebooks.first?.notes.first ?? stack.notebooks.first?.sections.first?.notes.first
+        return area.notes.first
+            ?? area.notebooks.first.flatMap { firstNoteInNotebook($0) }
+            ?? area.stacks.first?.notes.first
+            ?? area.stacks.first.flatMap { $0.notebooks.first.flatMap { firstNoteInNotebook($0) } }
     }
 
-    private func select(stackID: UUID) {
-        store.doc.notes.selection.stackID = stackID
-        let stack = store.doc.notes.stacks.first(where: { $0.id == stackID })
-        let nb = stack?.notebooks.first
-        store.doc.notes.selection.notebookID = nb?.id
-        let sec = nb?.sections.first
-        store.doc.notes.selection.sectionID = sec?.id
-        store.doc.notes.selection.noteID = sec?.notes.first?.id
+    private func select(areaID: UUID) {
+        store.doc.notes.selection.areaID = areaID
+        store.doc.notes.selection.stackID = nil
+        store.doc.notes.selection.notebookID = nil
+        store.doc.notes.selection.sectionID = nil
+        store.doc.notes.selection.noteID = nil
     }
 
     private func select(notebookID: UUID) {
         store.doc.notes.selection.notebookID = notebookID
-        if let nb = selectedStack()?.notebooks.first(where: { $0.id == notebookID }) {
+        store.doc.notes.selection.sectionID = nil
+        store.doc.notes.selection.noteID = nil
+
+        if let notebooks = selectedNotebookContainer(),
+           let nb = notebooks.first(where: { $0.id == notebookID }) {
             let sec = nb.sections.first
             store.doc.notes.selection.sectionID = sec?.id
-            store.doc.notes.selection.noteID = sec?.notes.first?.id
+            store.doc.notes.selection.noteID = sec?.notes.first?.id ?? nb.notes.first?.id
         }
     }
 
@@ -344,7 +547,10 @@ struct NotesWorkspaceView: View {
     private func bindingForSelectedNoteTitle() -> Binding<String> {
         Binding(
             get: { selectedNote()?.title ?? "" },
-            set: { newValue in updateSelectedNote { $0.title = newValue } }
+            set: { newValue in
+                let clamped = String(newValue.prefix(NoteItem.maxTitleLength))
+                updateSelectedNote { $0.title = clamped }
+            }
         )
     }
 
@@ -356,105 +562,124 @@ struct NotesWorkspaceView: View {
     }
 
     private func updateSelectedNote(_ mutate: (inout NoteItem) -> Void) {
-        guard let sID = store.doc.notes.selection.stackID,
-            let noteID = store.doc.notes.selection.noteID else { return }
+        guard let areaID = store.doc.notes.selection.areaID,
+              let noteID = store.doc.notes.selection.noteID else { return }
+        if store.isNoteLocked(noteID) && !store.isNoteUnlockedInSession(noteID) {
+            return
+        }
 
-        guard let sIdx = store.doc.notes.stacks.firstIndex(where: { $0.id == sID }) else { return }
+        guard let aIdx = store.doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
 
+        let stackID = store.doc.notes.selection.stackID
         let nbID = store.doc.notes.selection.notebookID
         let secID = store.doc.notes.selection.sectionID
 
-        // 1) Section note
+        if let stackID {
+            guard let sIdx = store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
+
+            // 1) Section note (stack)
+            if let nbID, let secID {
+                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
+                guard let secIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else { return }
+                guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+
+                var note = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx]
+                mutate(&note)
+                note.updatedAt = Date().timeIntervalSince1970
+                store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx] = note
+                store.doc.updatedAt = note.updatedAt
+                return
+            }
+
+            // 2) Notebook root note (stack)
+            if let nbID {
+                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
+                guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+
+                var note = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes[nIdx]
+                mutate(&note)
+                note.updatedAt = Date().timeIntervalSince1970
+                store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes[nIdx] = note
+                store.doc.updatedAt = note.updatedAt
+                return
+            }
+
+            // 3) Stack root note
+            guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+            var note = store.doc.notes.areas[aIdx].stacks[sIdx].notes[nIdx]
+            mutate(&note)
+            note.updatedAt = Date().timeIntervalSince1970
+            store.doc.notes.areas[aIdx].stacks[sIdx].notes[nIdx] = note
+            store.doc.updatedAt = note.updatedAt
+            return
+        }
+
+        // Area-level notes
         if let nbID, let secID {
-            guard let nbIdx = store.doc.notes.stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-            guard let secIdx = store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else { return }
-            guard let nIdx = store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
+            guard let secIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else { return }
+            guard let nIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
-            var note = store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx]
+            var note = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx]
             mutate(&note)
             note.updatedAt = Date().timeIntervalSince1970
-            store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx] = note
+            store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx] = note
             store.doc.updatedAt = note.updatedAt
             return
         }
 
-        // 2) Notebook root note
         if let nbID {
-            guard let nbIdx = store.doc.notes.stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-            guard let nIdx = store.doc.notes.stacks[sIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
+            guard let nIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
-            var note = store.doc.notes.stacks[sIdx].notebooks[nbIdx].notes[nIdx]
+            var note = store.doc.notes.areas[aIdx].notebooks[nbIdx].notes[nIdx]
             mutate(&note)
             note.updatedAt = Date().timeIntervalSince1970
-            store.doc.notes.stacks[sIdx].notebooks[nbIdx].notes[nIdx] = note
+            store.doc.notes.areas[aIdx].notebooks[nbIdx].notes[nIdx] = note
             store.doc.updatedAt = note.updatedAt
             return
         }
 
-        // 3) Stack root note
-        guard let nIdx = store.doc.notes.stacks[sIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-        var note = store.doc.notes.stacks[sIdx].notes[nIdx]
+        guard let nIdx = store.doc.notes.areas[aIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        var note = store.doc.notes.areas[aIdx].notes[nIdx]
         mutate(&note)
         note.updatedAt = Date().timeIntervalSince1970
-        store.doc.notes.stacks[sIdx].notes[nIdx] = note
+        store.doc.notes.areas[aIdx].notes[nIdx] = note
         store.doc.updatedAt = note.updatedAt
     }
 
     // ---- creation ----
 
-    private func addStack() {
-        let now = Date().timeIntervalSince1970
-        let note = NoteItem(id: UUID(), title: "", body: "", createdAt: now, updatedAt: now)
-        let section = NoteSection(id: UUID(), title: "Section", notes: [note])
-        let notebook = NoteNotebook(id: UUID(), title: "Notebook", sections: [section])
-        let stack = NoteStack(id: UUID(), title: "New Stack", notebooks: [notebook])
-        store.doc.notes.stacks.append(stack)
-        store.doc.notes.selection = NotesSelection(stackID: stack.id, notebookID: notebook.id, sectionID: section.id, noteID: note.id)
+    private func addArea() {
+        store.addArea(title: "New Area")
     }
 
     private func addNotebook() {
-        guard let sID = store.doc.notes.selection.stackID,
-              let sIdx = store.doc.notes.stacks.firstIndex(where: { $0.id == sID }) else {
-            addStack(); return
+        guard let areaID = store.doc.notes.selection.areaID else {
+            addArea(); return
         }
-        let now = Date().timeIntervalSince1970
-        let note = NoteItem(id: UUID(), title: "", body: "", createdAt: now, updatedAt: now)
-        let section = NoteSection(id: UUID(), title: "Section", notes: [note])
-        let notebook = NoteNotebook(id: UUID(), title: "New Notebook", sections: [section])
-        store.doc.notes.stacks[sIdx].notebooks.append(notebook)
-        store.doc.notes.selection.notebookID = notebook.id
-        store.doc.notes.selection.sectionID = section.id
-        store.doc.notes.selection.noteID = note.id
+        store.addNotebook(areaID: areaID, stackID: store.doc.notes.selection.stackID, title: "New Notebook")
     }
 
     private func addSection() {
-        guard let sID = store.doc.notes.selection.stackID,
-              let nbID = store.doc.notes.selection.notebookID,
-              let sIdx = store.doc.notes.stacks.firstIndex(where: { $0.id == sID }),
-              let nbIdx = store.doc.notes.stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else {
+        guard let areaID = store.doc.notes.selection.areaID,
+              let notebookID = store.doc.notes.selection.notebookID else {
             addNotebook(); return
         }
-        let now = Date().timeIntervalSince1970
-        let note = NoteItem(id: UUID(), title: "", body: "", createdAt: now, updatedAt: now)
-        let section = NoteSection(id: UUID(), title: "New Section", notes: [note])
-        store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections.append(section)
-        store.doc.notes.selection.sectionID = section.id
-        store.doc.notes.selection.noteID = note.id
+        store.addSection(areaID: areaID, stackID: store.doc.notes.selection.stackID, notebookID: notebookID, title: "New Section")
     }
 
     private func addNote() {
-        guard let sID = store.doc.notes.selection.stackID,
-              let nbID = store.doc.notes.selection.notebookID,
-              let secID = store.doc.notes.selection.sectionID,
-              let sIdx = store.doc.notes.stacks.firstIndex(where: { $0.id == sID }),
-              let nbIdx = store.doc.notes.stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }),
-              let secIdx = store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else {
-            addSection(); return
+        guard let areaID = store.doc.notes.selection.areaID else {
+            addArea(); return
         }
-        let now = Date().timeIntervalSince1970
-        let note = NoteItem(id: UUID(), title: "", body: "", createdAt: now, updatedAt: now)
-        store.doc.notes.stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.append(note)
-        store.doc.notes.selection.noteID = note.id
+        store.addNote(
+            areaID: areaID,
+            stackID: store.doc.notes.selection.stackID,
+            notebookID: store.doc.notes.selection.notebookID,
+            sectionID: store.doc.notes.selection.sectionID,
+            title: ""
+        )
     }
 }
 
@@ -597,6 +822,15 @@ struct BoardWorldView: View {
                     lineDragStart = nil
                 }
             }
+            .onChange(of: store.editingEntryID) { id in
+                guard let id else {
+                    activeTextEdit = nil
+                    return
+                }
+                if store.doc.entries[id]?.type == .text {
+                    activeTextEdit = id
+                }
+            }
             .coordinateSpace(name: "board")
         }
     }
@@ -619,6 +853,21 @@ struct BoardWorldView: View {
                 if !store.doc.ui.panels.shapeStyle.isOpen {
                     store.togglePanel(.shapeStyle)
                 }
+            }
+        }
+        
+        // Image actions
+        if entry.type == .image {
+            Button("Copy Image") { store.copyImageToPasteboard(id: entry.id) }
+            Button("Save Image…") { store.saveImageEntryToDisk(id: entry.id) }
+            Divider()
+            if store.doc.ui.activeImageCropID == entry.id {
+                Button("Done Cropping") { store.endImageCrop() }
+            } else {
+                Button("Crop…") { store.beginImageCrop(entry.id) }
+            }
+            if entry.imageCrop != nil {
+                Button("Reset Crop") { store.resetImageCrop(entry.id) }
             }
         }
 
@@ -655,6 +904,9 @@ struct BoardWorldView: View {
                 if let hit = store.topEntryAtScreenPoint(screenPoint) {
                     store.selection = [hit]
                     withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu() }
+                    if let active = store.doc.ui.activeImageCropID, active != hit {
+                        store.endImageCrop()
+                    }
                 } else {
                     // Left click empty board should NOT open the palette anymore.
                     store.selection.removeAll()
@@ -662,6 +914,7 @@ struct BoardWorldView: View {
                     if store.isToolMenuVisible {
                         withAnimation(.easeOut(duration: 0.12)) { store.hideToolMenu(suppressNextShow: false) }
                     }
+                    store.endImageCrop()
                 }
 
             case .text:
@@ -906,7 +1159,11 @@ struct BoardWorldView: View {
         let rect = CGRect(x: point.x - 120, y: point.y - 80, width: 240, height: 160)
         let id = store.createEntry(type: .text, frame: rect, data: .text(""))
         store.selection = [id]
+
+        // Put it straight into "waiting for text" mode
+        store.beginEditing(id)
         activeTextEdit = id
+
         store.currentTool = .select
     }
 
@@ -1139,6 +1396,7 @@ struct NotesSidebarTree: View {
 
     @Binding var sidebarCollapsed: Bool
 
+    @State private var expandedAreas: Set<UUID> = []
     @State private var expandedStacks: Set<UUID> = []
     @State private var expandedNotebooks: Set<UUID> = []
     @State private var expandedSections: Set<UUID> = []
@@ -1148,29 +1406,163 @@ struct NotesSidebarTree: View {
     @State private var searchQuery: String = ""
     @State private var searchResults: [NoteSearchResult] = []
 
+    private let standardPageCharacterCount = 1600
+    private let maxPageIcons = 4
+
     // Drag payload is a plain string so we can use UTType.plainText everywhere.
-    // Format: fromStack|fromNotebook(optional)|fromSection(optional)|noteID
-    private func makeDragString(stackID: UUID, notebookID: UUID?, sectionID: UUID?, noteID: UUID) -> String {
+    // Note format: fromArea|fromStack(optional)|fromNotebook(optional)|fromSection(optional)|noteID
+    // Area format: area|areaID
+    // Stack format: stack|fromArea|stackID
+    // Notebook format: notebook|fromArea|fromStack(optional)|notebookID
+    // Section format: section|fromArea|fromStack(optional)|fromNotebook|sectionID
+    private func makeDragString(areaID: UUID, stackID: UUID?, notebookID: UUID?, sectionID: UUID?, noteID: UUID) -> String {
+        let stack = stackID?.uuidString ?? ""
         let nb = notebookID?.uuidString ?? ""
         let sec = sectionID?.uuidString ?? ""
-        return "\(stackID.uuidString)|\(nb)|\(sec)|\(noteID.uuidString)"
+        return "\(areaID.uuidString)|\(stack)|\(nb)|\(sec)|\(noteID.uuidString)"
     }
 
-    private func parseDragString(_ s: String) -> (fromStack: UUID, fromNotebook: UUID?, fromSection: UUID?, noteID: UUID)? {
+    private func makeAreaDragString(areaID: UUID) -> String {
+        "area|\(areaID.uuidString)"
+    }
+
+    private func makeStackDragString(areaID: UUID, stackID: UUID) -> String {
+        "stack|\(areaID.uuidString)|\(stackID.uuidString)"
+    }
+
+    private func makeNotebookDragString(areaID: UUID, stackID: UUID?, notebookID: UUID) -> String {
+        let stack = stackID?.uuidString ?? ""
+        return "notebook|\(areaID.uuidString)|\(stack)|\(notebookID.uuidString)"
+    }
+
+    private func makeSectionDragString(areaID: UUID, stackID: UUID?, notebookID: UUID, sectionID: UUID) -> String {
+        let stack = stackID?.uuidString ?? ""
+        return "section|\(areaID.uuidString)|\(stack)|\(notebookID.uuidString)|\(sectionID.uuidString)"
+    }
+
+    private enum DragPayload {
+        case note(fromArea: UUID, fromStack: UUID?, fromNotebook: UUID?, fromSection: UUID?, noteID: UUID)
+        case area(areaID: UUID)
+        case stack(fromArea: UUID, stackID: UUID)
+        case notebook(fromArea: UUID, fromStack: UUID?, notebookID: UUID)
+        case section(fromArea: UUID, fromStack: UUID?, fromNotebook: UUID, sectionID: UUID)
+    }
+
+    private enum DropTarget {
+        case area(UUID)
+        case stack(areaID: UUID, stackID: UUID)
+        case notebook(areaID: UUID, stackID: UUID?, notebookID: UUID)
+        case section(areaID: UUID, stackID: UUID?, notebookID: UUID, sectionID: UUID)
+        case note(areaID: UUID, stackID: UUID?, notebookID: UUID?, sectionID: UUID?, noteID: UUID)
+    }
+
+    private enum DropPurpose {
+        case moveInto
+        case reorder
+    }
+
+    private func parseDragString(_ s: String) -> DragPayload? {
         let parts = s.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-        guard parts.count == 4 else { return nil }
-        guard let fromStack = UUID(uuidString: parts[0]) else { return nil }
-        let fromNotebook = parts[1].isEmpty ? nil : UUID(uuidString: parts[1])
-        let fromSection = parts[2].isEmpty ? nil : UUID(uuidString: parts[2])
-        guard let noteID = UUID(uuidString: parts[3]) else { return nil }
-        return (fromStack, fromNotebook, fromSection, noteID)
+        if parts.first == "area" {
+            guard parts.count == 2 else { return nil }
+            guard let areaID = UUID(uuidString: parts[1]) else { return nil }
+            return .area(areaID: areaID)
+        }
+
+        if parts.first == "stack" {
+            guard parts.count == 3 else { return nil }
+            guard let fromArea = UUID(uuidString: parts[1]) else { return nil }
+            guard let stackID = UUID(uuidString: parts[2]) else { return nil }
+            return .stack(fromArea: fromArea, stackID: stackID)
+        }
+
+        if parts.first == "notebook" {
+            guard parts.count == 4 else { return nil }
+            guard let fromArea = UUID(uuidString: parts[1]) else { return nil }
+            let fromStack = parts[2].isEmpty ? nil : UUID(uuidString: parts[2])
+            guard let notebookID = UUID(uuidString: parts[3]) else { return nil }
+            return .notebook(fromArea: fromArea, fromStack: fromStack, notebookID: notebookID)
+        }
+
+        if parts.first == "section" {
+            guard parts.count == 5 else { return nil }
+            guard let fromArea = UUID(uuidString: parts[1]) else { return nil }
+            let fromStack = parts[2].isEmpty ? nil : UUID(uuidString: parts[2])
+            guard let fromNotebook = UUID(uuidString: parts[3]) else { return nil }
+            guard let sectionID = UUID(uuidString: parts[4]) else { return nil }
+            return .section(fromArea: fromArea, fromStack: fromStack, fromNotebook: fromNotebook, sectionID: sectionID)
+        }
+
+        guard parts.count == 5 else { return nil }
+        guard let fromArea = UUID(uuidString: parts[0]) else { return nil }
+        let fromStack = parts[1].isEmpty ? nil : UUID(uuidString: parts[1])
+        let fromNotebook = parts[2].isEmpty ? nil : UUID(uuidString: parts[2])
+        let fromSection = parts[3].isEmpty ? nil : UUID(uuidString: parts[3])
+        guard let noteID = UUID(uuidString: parts[4]) else { return nil }
+        return .note(fromArea: fromArea, fromStack: fromStack, fromNotebook: fromNotebook, fromSection: fromSection, noteID: noteID)
     }
 
-    private func handleNoteDrop(
+    private func areaIndex(_ areaID: UUID) -> Int? {
+        store.doc.notes.areas.firstIndex(where: { $0.id == areaID })
+    }
+
+    private func stackIndex(areaID: UUID, stackID: UUID) -> Int? {
+        guard let aIdx = areaIndex(areaID) else { return nil }
+        return store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID })
+    }
+
+    private func notebookIndex(areaID: UUID, stackID: UUID?, notebookID: UUID) -> Int? {
+        guard let aIdx = areaIndex(areaID) else { return nil }
+        if let stackID {
+            guard let sIdx = store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return nil }
+            return store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID })
+        }
+        return store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID })
+    }
+
+    private func sectionIndex(areaID: UUID, stackID: UUID?, notebookID: UUID, sectionID: UUID) -> Int? {
+        guard let aIdx = areaIndex(areaID) else { return nil }
+        if let stackID {
+            guard let sIdx = store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return nil }
+            guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+            return store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID })
+        }
+        guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+        return store.doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID })
+    }
+
+    private func noteIndex(areaID: UUID, stackID: UUID?, notebookID: UUID?, sectionID: UUID?, noteID: UUID) -> Int? {
+        guard let aIdx = areaIndex(areaID) else { return nil }
+        if let stackID {
+            guard let sIdx = store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return nil }
+            if let notebookID, let sectionID {
+                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+                guard let secIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return nil }
+                return store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID })
+            }
+            if let notebookID {
+                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+                return store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID })
+            }
+            return store.doc.notes.areas[aIdx].stacks[sIdx].notes.firstIndex(where: { $0.id == noteID })
+        }
+        if let notebookID, let sectionID {
+            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+            guard let secIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return nil }
+            return store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID })
+        }
+        if let notebookID {
+            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return nil }
+            return store.doc.notes.areas[aIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID })
+        }
+        return store.doc.notes.areas[aIdx].notes.firstIndex(where: { $0.id == noteID })
+    }
+
+    private func handleDrop(
         _ providers: [NSItemProvider],
-        toStackID: UUID,
-        toNotebookID: UUID?,
-        toSectionID: UUID?
+        to target: DropTarget,
+        insertAfter: Bool? = nil,
+        purpose: DropPurpose
     ) -> Bool {
         guard let provider = providers.first(where: { $0.canLoadObject(ofClass: NSString.self) }) else { return false }
 
@@ -1179,25 +1571,178 @@ struct NotesSidebarTree: View {
             guard let payload = parseDragString(s) else { return }
 
             DispatchQueue.main.async {
-                store.moveNote(
-                    fromStackID: payload.fromStack,
-                    fromNotebookID: payload.fromNotebook,
-                    fromSectionID: payload.fromSection,
-                    noteID: payload.noteID,
-                    toStackID: toStackID,
-                    toNotebookID: toNotebookID,
-                    toSectionID: toSectionID
-                )
-
-                // Keep the destination visible.
-                expandedStacks.insert(toStackID)
-                if let toNotebookID { expandedNotebooks.insert(toNotebookID) }
-                if let toSectionID { expandedSections.insert(toSectionID) }
+                switch (payload, target) {
+                case let (.note(fromArea, fromStack, fromNotebook, fromSection, noteID), .area(areaID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNote(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        fromSectionID: fromSection,
+                        noteID: noteID,
+                        toAreaID: areaID,
+                        toStackID: nil,
+                        toNotebookID: nil,
+                        toSectionID: nil
+                    )
+                    expandedAreas.insert(areaID)
+                case let (.note(fromArea, fromStack, fromNotebook, fromSection, noteID), .stack(areaID, stackID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNote(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        fromSectionID: fromSection,
+                        noteID: noteID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: nil,
+                        toSectionID: nil
+                    )
+                    expandedAreas.insert(areaID)
+                    expandedStacks.insert(stackID)
+                case let (.note(fromArea, fromStack, fromNotebook, fromSection, noteID), .notebook(areaID, stackID, notebookID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNote(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        fromSectionID: fromSection,
+                        noteID: noteID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: notebookID,
+                        toSectionID: nil
+                    )
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    expandedNotebooks.insert(notebookID)
+                case let (.note(fromArea, fromStack, fromNotebook, fromSection, noteID), .section(areaID, stackID, notebookID, sectionID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNote(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        fromSectionID: fromSection,
+                        noteID: noteID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: notebookID,
+                        toSectionID: sectionID
+                    )
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    expandedNotebooks.insert(notebookID)
+                    expandedSections.insert(sectionID)
+                case let (.note(fromArea, fromStack, fromNotebook, fromSection, noteID), .note(areaID, stackID, notebookID, sectionID, targetNoteID)):
+                    guard purpose == .reorder else { break }
+                    guard let toIndex = noteIndex(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: sectionID, noteID: targetNoteID) else { break }
+                    let insertIndex = insertAfter == true ? toIndex + 1 : toIndex
+                    store.moveNote(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        fromSectionID: fromSection,
+                        noteID: noteID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: notebookID,
+                        toSectionID: sectionID,
+                        toIndex: insertIndex
+                    )
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    if let notebookID { expandedNotebooks.insert(notebookID) }
+                    if let sectionID { expandedSections.insert(sectionID) }
+                case let (.area(fromAreaID), .area(toAreaID)):
+                    guard purpose == .reorder else { break }
+                    guard let toIndex = areaIndex(toAreaID) else { break }
+                    let insertIndex = insertAfter == true ? toIndex + 1 : toIndex
+                    store.moveArea(areaID: fromAreaID, toIndex: insertIndex)
+                    expandedAreas.insert(toAreaID)
+                case let (.stack(fromArea, stackID), .area(areaID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveStack(fromAreaID: fromArea, stackID: stackID, toAreaID: areaID)
+                    expandedAreas.insert(areaID)
+                    expandedStacks.insert(stackID)
+                case let (.stack(fromArea, stackID), .stack(areaID, targetStackID)):
+                    guard purpose == .reorder else { break }
+                    guard let toIndex = stackIndex(areaID: areaID, stackID: targetStackID) else { break }
+                    let insertIndex = insertAfter == true ? toIndex + 1 : toIndex
+                    store.moveStack(fromAreaID: fromArea, stackID: stackID, toAreaID: areaID, toIndex: insertIndex)
+                    expandedAreas.insert(areaID)
+                    expandedStacks.insert(stackID)
+                case let (.notebook(fromArea, fromStack, notebookID), .area(areaID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNotebook(fromAreaID: fromArea, fromStackID: fromStack, notebookID: notebookID, toAreaID: areaID, toStackID: nil)
+                    expandedAreas.insert(areaID)
+                    expandedNotebooks.insert(notebookID)
+                case let (.notebook(fromArea, fromStack, notebookID), .stack(areaID, stackID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveNotebook(fromAreaID: fromArea, fromStackID: fromStack, notebookID: notebookID, toAreaID: areaID, toStackID: stackID)
+                    expandedAreas.insert(areaID)
+                    expandedStacks.insert(stackID)
+                    expandedNotebooks.insert(notebookID)
+                case let (.notebook(fromArea, fromStack, notebookID), .notebook(areaID, stackID, targetNotebookID)):
+                    guard purpose == .reorder else { break }
+                    guard let toIndex = notebookIndex(areaID: areaID, stackID: stackID, notebookID: targetNotebookID) else { break }
+                    let insertIndex = insertAfter == true ? toIndex + 1 : toIndex
+                    store.moveNotebook(fromAreaID: fromArea, fromStackID: fromStack, notebookID: notebookID, toAreaID: areaID, toStackID: stackID, toIndex: insertIndex)
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    expandedNotebooks.insert(notebookID)
+                case let (.section(fromArea, fromStack, fromNotebook, sectionID), .section(areaID, stackID, notebookID, targetSectionID)):
+                    guard purpose == .reorder else { break }
+                    guard let toIndex = sectionIndex(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: targetSectionID) else { break }
+                    let insertIndex = insertAfter == true ? toIndex + 1 : toIndex
+                    store.moveSection(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        sectionID: sectionID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: notebookID,
+                        toIndex: insertIndex
+                    )
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    expandedNotebooks.insert(notebookID)
+                    expandedSections.insert(sectionID)
+                case let (.section(fromArea, fromStack, fromNotebook, sectionID), .notebook(areaID, stackID, notebookID)):
+                    guard purpose == .moveInto else { break }
+                    store.moveSection(
+                        fromAreaID: fromArea,
+                        fromStackID: fromStack,
+                        fromNotebookID: fromNotebook,
+                        sectionID: sectionID,
+                        toAreaID: areaID,
+                        toStackID: stackID,
+                        toNotebookID: notebookID
+                    )
+                    expandedAreas.insert(areaID)
+                    if let stackID { expandedStacks.insert(stackID) }
+                    expandedNotebooks.insert(notebookID)
+                default:
+                    break
+                }
             }
         }
 
         return true
     }
+
+    private func reorderDropZone(target: DropTarget, indent: Int, insertAfter: Bool) -> some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(height: 6)
+            .padding(.leading, CGFloat(indent) * 14)
+            .contentShape(Rectangle())
+            .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                handleDrop(providers, to: target, insertAfter: insertAfter, purpose: .reorder)
+            }
+    }
+
 
     private func promptRename(kind: String, current: String, onSave: @escaping (String) -> Void) {
         let alert = NSAlert()
@@ -1239,103 +1784,446 @@ struct NotesSidebarTree: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(store.doc.notes.stacks) { stack in
+                    ForEach(store.doc.notes.areas) { area in
+                        reorderDropZone(target: .area(area.id), indent: 0, insertAfter: false)
                         DisclosureGroup(
-                            isExpanded: bindingExpanded($expandedStacks, stack.id)
+                            isExpanded: bindingExpanded($expandedAreas, area.id)
                         ) {
                             VStack(alignment: .leading, spacing: 2) {
-                                // stack-level notes (NEW)
-                                ForEach(stack.notes) { note in
+                                // area-level notes
+                                ForEach(area.notes) { note in
+                                    reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil, noteID: note.id), indent: 1, insertAfter: false)
                                     noteRow(
                                         title: note.displayTitle,
+                                        locked: note.isLocked,
                                         indent: 1,
-                                        isSelected: isSelected(stack: stack.id, notebook: nil, section: nil, note: note.id)
+                                        isSelected: isSelected(area: area.id, stack: nil, notebook: nil, section: nil, note: note.id),
+                                        pageCount: notePageCount(note)
                                     )
-                                    .onTapGesture { selectStackNote(stackID: stack.id, noteID: note.id) }
-                                    .onDrag { NSItemProvider(object: makeDragString(stackID: stack.id, notebookID: nil, sectionID: nil, noteID: note.id) as NSString)}
+                                    .onTapGesture {
+                                        Task {
+                                            guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                            selectAreaNote(areaID: area.id, noteID: note.id)
+                                        }
+                                    }
+                                    .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil, noteID: note.id) as NSString)}
                                     .contextMenu {
+                                        if note.isLocked {
+                                            Button("Unlock Note…") {
+                                                Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                            }
+                                        } else {
+                                            Button("Lock Note…") {
+                                                Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                            }
+                                        }
+
+                                        Divider()
+                                        
                                         Button("Delete Note", role: .destructive) {
                                             confirmDelete(kind: "Note", name: note.displayTitle) {
-                                                store.deleteNote(stackID: stack.id, notebookID: nil, sectionID: nil, noteID: note.id)
+                                                store.deleteNote(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil, noteID: note.id)
                                             }
                                         }
                                     }
                                 }
-                                ForEach(stack.notebooks) { nb in
+                                if let last = area.notes.last {
+                                    reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil, noteID: last.id), indent: 1, insertAfter: true)
+                                }
+                                ForEach(area.notebooks, id: \.id) { nb in
+                                    reorderDropZone(target: .notebook(areaID: area.id, stackID: nil, notebookID: nb.id), indent: 1, insertAfter: false)
                                     DisclosureGroup(
                                         isExpanded: bindingExpanded($expandedNotebooks, nb.id)
                                     ) {
                                         VStack(alignment: .leading, spacing: 2) {
                                             // notebook-level notes
                                             ForEach(nb.notes) { note in
+                                                reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: note.id), indent: 2, insertAfter: false)
                                                 noteRow(
                                                     title: note.displayTitle,
+                                                    locked: note.isLocked,
                                                     indent: 2,
-                                                    isSelected: isSelected(stack: stack.id, notebook: nb.id, section: nil, note: note.id)
+                                                    isSelected: isSelected(area: area.id, stack: nil, notebook: nb.id, section: nil, note: note.id),
+                                                    pageCount: notePageCount(note)
                                                 )
-                                                .onTapGesture { selectNote(stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id) }
-                                                .onDrag { NSItemProvider(object: makeDragString(stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id) as NSString) }
+                                                .onTapGesture {
+                                                    Task {
+                                                        guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                                        selectNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: note.id)
+                                                    }
+                                                }
+                                                .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: note.id) as NSString) }
                                                 .contextMenu {
+                                                    if note.isLocked {
+                                                        Button("Unlock Note…") {
+                                                            Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                                        }
+                                                    } else {
+                                                        Button("Lock Note…") {
+                                                            Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                                        }
+                                                    }
+
+                                                    Divider()
                                                     Button("Delete Note", role: .destructive) {
                                                         confirmDelete(kind: "Note", name: note.displayTitle) {
-                                                            store.deleteNote(stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id)
+                                                            store.deleteNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: note.id)
                                                         }
                                                     }
                                                 }
                                             }
+                                            if let last = nb.notes.last {
+                                                reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: last.id), indent: 2, insertAfter: true)
+                                            }
 
                                             // sections
                                             ForEach(nb.sections) { section in
+                                                reorderDropZone(target: .section(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id), indent: 2, insertAfter: false)
                                                 DisclosureGroup(
                                                     isExpanded: bindingExpanded($expandedSections, section.id)
                                                 ) {
                                                     VStack(alignment: .leading, spacing: 2) {
                                                         ForEach(section.notes) { note in
+                                                            reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, noteID: note.id), indent: 3, insertAfter: false)
                                                             noteRow(
                                                                 title: note.displayTitle,
+                                                                locked: note.isLocked,
                                                                 indent: 3,
-                                                                isSelected: isSelected(stack: stack.id, notebook: nb.id, section: section.id, note: note.id)
+                                                                isSelected: isSelected(area: area.id, stack: nil, notebook: nb.id, section: section.id, note: note.id),
+                                                                pageCount: notePageCount(note)
                                                             )
-                                                            .onTapGesture { selectNote(stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id) }
-                                                            .onDrag { NSItemProvider(object: makeDragString(stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id) as NSString)}
+                                                            .onTapGesture {
+                                                                Task {
+                                                                    guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                                                    selectNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, noteID: note.id)
+                                                                }
+                                                            }
+                                                            .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, noteID: note.id) as NSString)}
                                                             .contextMenu {
+                                                                if note.isLocked {
+                                                                    Button("Unlock Note…") {
+                                                                        Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                                                    }
+                                                                } else {
+                                                                    Button("Lock Note…") {
+                                                                        Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                                                    }
+                                                                }
+
+                                                                Divider()
+                                                                
                                                                 Button("Delete Note", role: .destructive) {
                                                                     confirmDelete(kind: "Note", name: note.displayTitle) {
-                                                                        store.deleteNote(stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id)
+                                                                        store.deleteNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, noteID: note.id)
                                                                     }
                                                                 }
                                                             }
+                                                        }
+                                                        if let last = section.notes.last {
+                                                            reorderDropZone(target: .note(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, noteID: last.id), indent: 3, insertAfter: true)
                                                         }
                                                     }
                                                 } label: {
                                                     folderRow(
                                                         title: section.title,
                                                         indent: 2,
-                                                        systemImage: isSelected(stack: stack.id, notebook: nb.id, section: section.id, note: nil)
+                                            systemImage: isSelected(area: area.id, stack: nil, notebook: nb.id, section: section.id, note: nil)
                                                             ? "bookmark.fill"
                                                             : "bookmark",
                                                         count: section.notes.count,
-                                                        isSelected: isSelected(stack: stack.id, notebook: nb.id, section: section.id, note: nil)
-                                                    )
-                                                    .onTapGesture {
-                                                        toggleExpanded(&expandedSections, section.id)
+                                                        isSelected: isSelected(area: area.id, stack: nil, notebook: nb.id, section: section.id, note: nil)
+                                        )
+                                        .onTapGesture {
+                                            toggleExpanded(&expandedSections, section.id)
+                                        }
+                                                    .onDrag { NSItemProvider(object: makeSectionDragString(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id) as NSString) }
+                                                    .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                                        handleDrop(providers, to: .section(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id), purpose: .moveInto)
                                                     }
-                                                    .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in handleNoteDrop(providers, toStackID: stack.id, toNotebookID: nb.id, toSectionID: section.id) }
                                                     .contextMenu {
-                                                        Button("New Note") { store.addNote(stackID: stack.id, notebookID: nb.id, sectionID: section.id) }
+                                                        Button("New Note") { store.addNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id) }
 
                                                         Divider()
 
                                                         Button("Rename Section") {
                                                             promptRename(kind: "Section", current: section.title) { newTitle in
-                                                                store.renameSection(stackID: stack.id, notebookID: nb.id, sectionID: section.id, title: newTitle)
+                                                                store.renameSection(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id, title: newTitle)
                                                             }
                                                         }
 
                                                         Button("Delete Section", role: .destructive) {
                                                             confirmDelete(kind: "Section", name: section.title) {
                                                                 expandedSections.remove(section.id)
-                                                                store.deleteSection(stackID: stack.id, notebookID: nb.id, sectionID: section.id)
+                                                                store.deleteSection(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: section.id)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let last = nb.sections.last {
+                                                reorderDropZone(target: .section(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: last.id), indent: 2, insertAfter: true)
+                                            }
+                                        }
+                                        .padding(.leading, 14)
+                                    } label: {
+                                        folderRow(
+                                            title: nb.title,
+                                            indent: 1,
+                                            systemImage: isSelected(area: area.id, stack: nil, notebook: nb.id, section: nil, note: nil)
+                                                ? "book.closed.fill"
+                                                : "book.closed",
+                                            count: notebookNoteCount(nb),
+                                            isSelected: isSelected(area: area.id, stack: nil, notebook: nb.id, section: nil, note: nil)
+                                        )
+                                        .onTapGesture {
+                                            toggleExpanded(&expandedNotebooks, nb.id)
+                                        }
+                                        .onDrag { NSItemProvider(object: makeNotebookDragString(areaID: area.id, stackID: nil, notebookID: nb.id) as NSString) }
+                                        .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                            handleDrop(providers, to: .notebook(areaID: area.id, stackID: nil, notebookID: nb.id), purpose: .moveInto)
+                                        }
+                                        .contextMenu {
+                                            Button("New Section") { store.addSection(areaID: area.id, stackID: nil, notebookID: nb.id) }
+                                            Button("New Note") { store.addNote(areaID: area.id, stackID: nil, notebookID: nb.id, sectionID: nil) }
+
+                                            Divider()
+
+                                            Button("Rename Notebook") {
+                                                promptRename(kind: "Notebook", current: nb.title) { newTitle in
+                                                    store.renameNotebook(areaID: area.id, stackID: nil, notebookID: nb.id, title: newTitle)
+                                                }
+                                            }
+
+                                            Button("Delete Notebook", role: .destructive) {
+                                                confirmDelete(kind: "Notebook", name: nb.title) {
+                                                    expandedNotebooks.remove(nb.id)
+                                                    for sec in nb.sections { expandedSections.remove(sec.id) }
+                                                    store.deleteNotebook(areaID: area.id, stackID: nil, notebookID: nb.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if let last = area.notebooks.last {
+                                    reorderDropZone(target: .notebook(areaID: area.id, stackID: nil, notebookID: last.id), indent: 1, insertAfter: true)
+                                }
+
+                                ForEach(area.stacks) { stack in
+                                    reorderDropZone(target: .stack(areaID: area.id, stackID: stack.id), indent: 1, insertAfter: false)
+                                    DisclosureGroup(
+                                        isExpanded: bindingExpanded($expandedStacks, stack.id)
+                                    ) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            // stack-level notes
+                                            ForEach(stack.notes) { note in
+                                                reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nil, sectionID: nil, noteID: note.id), indent: 2, insertAfter: false)
+                                                noteRow(
+                                                    title: note.displayTitle,
+                                                    locked: note.isLocked,
+                                                    indent: 2,
+                                                    isSelected: isSelected(area: area.id, stack: stack.id, notebook: nil, section: nil, note: note.id),
+                                                    pageCount: notePageCount(note)
+                                                )
+                                                .onTapGesture {
+                                                    Task {
+                                                        guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                                        selectStackNote(areaID: area.id, stackID: stack.id, noteID: note.id)
+                                                    }
+                                                }
+                                                .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: stack.id, notebookID: nil, sectionID: nil, noteID: note.id) as NSString)}
+                                                .contextMenu {
+                                                    if note.isLocked {
+                                                        Button("Unlock Note…") {
+                                                            Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                                        }
+                                                    } else {
+                                                        Button("Lock Note…") {
+                                                            Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                                        }
+                                                    }
+
+                                                    Divider()
+
+                                                    Button("Delete Note", role: .destructive) {
+                                                        confirmDelete(kind: "Note", name: note.displayTitle) {
+                                                            store.deleteNote(areaID: area.id, stackID: stack.id, notebookID: nil, sectionID: nil, noteID: note.id)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if let last = stack.notes.last {
+                                                reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nil, sectionID: nil, noteID: last.id), indent: 2, insertAfter: true)
+                                            }
+
+                                            ForEach(stack.notebooks, id: \.id) { nb in
+                                                reorderDropZone(target: .notebook(areaID: area.id, stackID: stack.id, notebookID: nb.id), indent: 2, insertAfter: false)
+                                                DisclosureGroup(
+                                                    isExpanded: bindingExpanded($expandedNotebooks, nb.id)
+                                                ) {
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        // notebook-level notes
+                                                        ForEach(nb.notes) { note in
+                                                            reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id), indent: 3, insertAfter: false)
+                                                            noteRow(
+                                                                title: note.displayTitle,
+                                                                locked: note.isLocked,
+                                                                indent: 3,
+                                                                isSelected: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: nil, note: note.id),
+                                                                pageCount: notePageCount(note)
+                                                            )
+                                                            .onTapGesture {
+                                                                Task {
+                                                                    guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                                                    selectNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id)
+                                                                }
+                                                            }
+                                                            .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id) as NSString) }
+                                                            .contextMenu {
+                                                                if note.isLocked {
+                                                                    Button("Unlock Note…") {
+                                                                        Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                                                    }
+                                                                } else {
+                                                                    Button("Lock Note…") {
+                                                                        Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                                                    }
+                                                                }
+
+                                                                Divider()
+                                                                Button("Delete Note", role: .destructive) {
+                                                                    confirmDelete(kind: "Note", name: note.displayTitle) {
+                                                                        store.deleteNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: note.id)
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if let last = nb.notes.last {
+                                                            reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil, noteID: last.id), indent: 3, insertAfter: true)
+                                                        }
+
+                                                        // sections
+                                                        ForEach(nb.sections) { section in
+                                                            reorderDropZone(target: .section(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id), indent: 3, insertAfter: false)
+                                                            DisclosureGroup(
+                                                                isExpanded: bindingExpanded($expandedSections, section.id)
+                                                            ) {
+                                                                VStack(alignment: .leading, spacing: 2) {
+                                                                    ForEach(section.notes) { note in
+                                                                        reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id), indent: 4, insertAfter: false)
+                                                                        noteRow(
+                                                                            title: note.displayTitle,
+                                                                            locked: note.isLocked,
+                                                                            indent: 4,
+                                                                            isSelected: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: section.id, note: note.id),
+                                                                            pageCount: notePageCount(note)
+                                                                        )
+                                                                        .onTapGesture {
+                                                                            Task {
+                                                                                guard await store.ensureUnlockedForViewing(noteID: note.id) else { return }
+                                                                                selectNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id)
+                                                                            }
+                                                                        }
+                                                                        .onDrag { NSItemProvider(object: makeDragString(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id) as NSString)}
+                                                                        .contextMenu {
+                                                                            if note.isLocked {
+                                                                                Button("Unlock Note…") {
+                                                                                    Task { await store.unlockNoteWithAuth(noteID: note.id) }
+                                                                                }
+                                                                            } else {
+                                                                                Button("Lock Note…") {
+                                                                                    Task { await store.lockNoteWithAuth(noteID: note.id) }
+                                                                                }
+                                                                            }
+
+                                                                            Divider()
+                                                                            
+                                                                            Button("Delete Note", role: .destructive) {
+                                                                                confirmDelete(kind: "Note", name: note.displayTitle) {
+                                                                                    store.deleteNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: note.id)
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    if let last = section.notes.last {
+                                                                        reorderDropZone(target: .note(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, noteID: last.id), indent: 4, insertAfter: true)
+                                                                    }
+                                                                }
+                                                            } label: {
+                                                                folderRow(
+                                                                    title: section.title,
+                                                                    indent: 3,
+                                                                    systemImage: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: section.id, note: nil)
+                                                                        ? "bookmark.fill"
+                                                                        : "bookmark",
+                                                                    count: section.notes.count,
+                                                                    isSelected: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: section.id, note: nil)
+                                                                )
+                                                                .onTapGesture {
+                                                                    toggleExpanded(&expandedSections, section.id)
+                                                                }
+                                                                .onDrag { NSItemProvider(object: makeSectionDragString(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id) as NSString) }
+                                                                .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                                                    handleDrop(providers, to: .section(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id), purpose: .moveInto)
+                                                                }
+                                                                .contextMenu {
+                                                                    Button("New Note") { store.addNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id) }
+
+                                                                    Divider()
+
+                                                                    Button("Rename Section") {
+                                                                        promptRename(kind: "Section", current: section.title) { newTitle in
+                                                                            store.renameSection(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id, title: newTitle)
+                                                                        }
+                                                                    }
+
+                                                                    Button("Delete Section", role: .destructive) {
+                                                                        confirmDelete(kind: "Section", name: section.title) {
+                                                                            expandedSections.remove(section.id)
+                                                                            store.deleteSection(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: section.id)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if let last = nb.sections.last {
+                                                            reorderDropZone(target: .section(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: last.id), indent: 3, insertAfter: true)
+                                                        }
+                                                    }
+                                                    .padding(.leading, 14)
+                                                } label: {
+                                                    folderRow(
+                                                        title: nb.title,
+                                                        indent: 2,
+                                                        systemImage: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: nil, note: nil)
+                                                            ? "book.closed.fill"
+                                                            : "book.closed",
+                                                        count: notebookNoteCount(nb),
+                                                        isSelected: isSelected(area: area.id, stack: stack.id, notebook: nb.id, section: nil, note: nil)
+                                                    )
+                                                    .onTapGesture {
+                                                        toggleExpanded(&expandedNotebooks, nb.id)
+                                                    }
+                                                    .onDrag { NSItemProvider(object: makeNotebookDragString(areaID: area.id, stackID: stack.id, notebookID: nb.id) as NSString) }
+                                                    .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                                        handleDrop(providers, to: .notebook(areaID: area.id, stackID: stack.id, notebookID: nb.id), purpose: .moveInto)
+                                                    }
+                                                    .contextMenu {
+                                                        Button("New Section") { store.addSection(areaID: area.id, stackID: stack.id, notebookID: nb.id) }
+                                                        Button("New Note") { store.addNote(areaID: area.id, stackID: stack.id, notebookID: nb.id, sectionID: nil) }
+
+                                                        Divider()
+
+                                                        Button("Rename Notebook") {
+                                                            promptRename(kind: "Notebook", current: nb.title) { newTitle in
+                                                                store.renameNotebook(areaID: area.id, stackID: stack.id, notebookID: nb.id, title: newTitle)
+                                                            }
+                                                        }
+
+                                                        Button("Delete Notebook", role: .destructive) {
+                                                            confirmDelete(kind: "Notebook", name: nb.title) {
+                                                                expandedNotebooks.remove(nb.id)
+                                                                for sec in nb.sections { expandedSections.remove(sec.id) }
+                                                                store.deleteNotebook(areaID: area.id, stackID: stack.id, notebookID: nb.id)
                                                             }
                                                         }
                                                     }
@@ -1345,74 +2233,95 @@ struct NotesSidebarTree: View {
                                         .padding(.leading, 14)
                                     } label: {
                                         folderRow(
-                                            title: nb.title,
+                                            title: stack.title,
                                             indent: 1,
-                                            systemImage: isSelected(stack: stack.id, notebook: nb.id, section: nil, note: nil)
-                                                ? "book.closed.fill"
-                                                : "book.closed",
-                                            count: notebookNoteCount(nb),
-                                            isSelected: isSelected(stack: stack.id, notebook: nb.id, section: nil, note: nil)
+                                            systemImage: isSelected(area: area.id, stack: stack.id, notebook: nil, section: nil, note: nil)
+                                                ? "square.stack.3d.up.fill"
+                                                : "square.stack.3d.up",
+                                            count: stackNoteCount(stack),
+                                            isSelected: isSelected(area: area.id, stack: stack.id, notebook: nil, section: nil, note: nil)
                                         )
-                                        .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in handleNoteDrop(providers, toStackID: stack.id, toNotebookID: nb.id, toSectionID: nil) }
+                                        .onTapGesture {
+                                            toggleExpanded(&expandedStacks, stack.id)
+                                        }
+                                        .onDrag { NSItemProvider(object: makeStackDragString(areaID: area.id, stackID: stack.id) as NSString) }
+                                        .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                            handleDrop(providers, to: .stack(areaID: area.id, stackID: stack.id), purpose: .moveInto)
+                                        }
                                         .contextMenu {
-                                            Button("New Section") { store.addSection(stackID: stack.id, notebookID: nb.id) }
-                                            Button("New Note") { store.addNote(stackID: stack.id, notebookID: nb.id, sectionID: nil) }
+                                            Button("New Note") { store.addNote(areaID: area.id, stackID: stack.id, notebookID: nil, sectionID: nil) }
+                                            Button("New Notebook") { store.addNotebook(areaID: area.id, stackID: stack.id) }
 
                                             Divider()
 
-                                            Button("Rename Notebook") {
-                                                promptRename(kind: "Notebook", current: nb.title) { newTitle in
-                                                    store.renameNotebook(stackID: stack.id, notebookID: nb.id, title: newTitle)
+                                            Button("Rename Stack") {
+                                                promptRename(kind: "Stack", current: stack.title) { newTitle in
+                                                    store.renameStack(areaID: area.id, stackID: stack.id, title: newTitle)
                                                 }
                                             }
 
-                                            Button("Delete Notebook", role: .destructive) {
-                                                confirmDelete(kind: "Notebook", name: nb.title) {
-                                                    expandedNotebooks.remove(nb.id)
-                                                    for sec in nb.sections { expandedSections.remove(sec.id) }
-                                                    store.deleteNotebook(stackID: stack.id, notebookID: nb.id)
+                                            Button("Delete Stack", role: .destructive) {
+                                                confirmDelete(kind: "Stack", name: stack.title) {
+                                                    expandedStacks.remove(stack.id)
+                                                    for nb in stack.notebooks {
+                                                        expandedNotebooks.remove(nb.id)
+                                                        for sec in nb.sections { expandedSections.remove(sec.id) }
+                                                    }
+                                                    store.deleteStack(areaID: area.id, stackID: stack.id)
                                                 }
                                             }
                                         }
                                     }
                                 }
+                                if let last = area.stacks.last {
+                                    reorderDropZone(target: .stack(areaID: area.id, stackID: last.id), indent: 1, insertAfter: true)
+                                }
                             }
                             .padding(.leading, 14)
                         } label: {
                             folderRow(
-                                title: stack.title,
+                                title: area.title,
                                 indent: 0,
-                                systemImage: isSelected(stack: stack.id, notebook: nil, section: nil, note: nil)
-                                    ? "square.stack.3d.up.fill"
-                                    : "square.stack.3d.up",
-                                count: stackNoteCount(stack),
-                                isSelected: isSelected(stack: stack.id, notebook: nil, section: nil, note: nil)
+                                systemImage: "rectangle.3.group",
+                                count: areaNoteCount(area),
+                                isSelected: isSelected(area: area.id, stack: nil, notebook: nil, section: nil, note: nil)
                             )
                             .onTapGesture {
-                                toggleExpanded(&expandedStacks, stack.id)
+                                toggleExpanded(&expandedAreas, area.id)
                             }
-                            .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in handleNoteDrop(providers, toStackID: stack.id, toNotebookID: nil, toSectionID: nil) }
+                            .onDrag { NSItemProvider(object: makeAreaDragString(areaID: area.id) as NSString) }
+                            .onDrop(of: [UTType.plainText], isTargeted: nil) { providers in
+                                handleDrop(providers, to: .area(area.id), purpose: .moveInto)
+                            }
                             .contextMenu {
-                                Button("New Note") { store.addNote(stackID: stack.id, notebookID: nil, sectionID: nil) }
-                                Button("New Notebook") { store.addNotebook(stackID: stack.id) }
+                                Button("New Note") { store.addNote(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil) }
+                                Button("New Notebook") { store.addNotebook(areaID: area.id, stackID: nil) }
+                                Button("New Stack") { store.addStack(areaID: area.id) }
 
-                                if stack.id != store.doc.notes.quickNotesStackID {
+                                if area.id != store.doc.notes.quickNotesAreaID {
                                     Divider()
 
-                                    Button("Rename Stack") {
-                                        promptRename(kind: "Stack", current: stack.title) { newTitle in
-                                            store.renameStack(id: stack.id, title: newTitle)
+                                    Button("Rename Area") {
+                                        promptRename(kind: "Area", current: area.title) { newTitle in
+                                            store.renameArea(id: area.id, title: newTitle)
                                         }
                                     }
 
-                                    Button("Delete Stack", role: .destructive) {
-                                        confirmDelete(kind: "Stack", name: stack.title) {
-                                            expandedStacks.remove(stack.id)
-                                            for nb in stack.notebooks {
+                                    Button("Delete Area", role: .destructive) {
+                                        confirmDelete(kind: "Area", name: area.title) {
+                                            expandedAreas.remove(area.id)
+                                            for stack in area.stacks {
+                                                expandedStacks.remove(stack.id)
+                                                for nb in stack.notebooks {
+                                                    expandedNotebooks.remove(nb.id)
+                                                    for sec in nb.sections { expandedSections.remove(sec.id) }
+                                                }
+                                            }
+                                            for nb in area.notebooks {
                                                 expandedNotebooks.remove(nb.id)
                                                 for sec in nb.sections { expandedSections.remove(sec.id) }
                                             }
-                                            store.deleteStack(id: stack.id)
+                                            store.deleteArea(id: area.id)
                                         }
                                     }
                                 }
@@ -1424,9 +2333,9 @@ struct NotesSidebarTree: View {
             }
         }
         .onAppear {
-            // Apple Notes vibe: stacks shown, but not necessarily expanded.
+            // Apple Notes vibe: areas shown, but not necessarily expanded.
             // If you want them expanded by default, uncomment:
-            // expandedStacks = Set(store.doc.notes.stacks.map(\.id))
+            // expandedAreas = Set(store.doc.notes.areas.map(\.id))
             if !searchQuery.isEmpty {
                 performSearch()
             }
@@ -1459,20 +2368,24 @@ struct NotesSidebarTree: View {
                     results: searchResults,
                     onSubmit: { performSearch() },
                     onSelect: { result in
-                        selectNoteByID(result.noteID)
-                        isShowingSearch = false
+                        Task {
+                            guard await store.ensureUnlockedForViewing(noteID: result.noteID) else { return }
+                            selectNoteByID(result.noteID)
+                            isShowingSearch = false
+                        }
                     }
                 )
                 .environmentObject(store)
             }
 
             Menu {
-                Button("Add Stack") { store.addStack() }
+                Button("Add Area") { store.addArea() }
                 Button("Quick Note") { store.addQuickNote() }
             } label: {
                 Image(systemName: "plus")
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
 
             Button { sidebarCollapsed = true } label: {
                 Image(systemName: "line.3.horizontal")
@@ -1504,12 +2417,14 @@ struct NotesSidebarTree: View {
         .contentShape(Rectangle())
     }
 
-    private func noteRow(title: String, indent: Int, isSelected: Bool) -> some View {
+    private func noteRow(title: String, locked: Bool, indent: Int, isSelected: Bool, pageCount: Int) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "doc.text")
-                .frame(width: 16)
+            noteIcon(locked: locked, pageCount: pageCount)
+                .frame(width: noteIconWidth(pageCount: pageCount), height: 16, alignment: .leading)
+
             Text(title)
                 .font(.system(size: 13, weight: .regular))
+
             Spacer()
         }
         .padding(.vertical, 6)
@@ -1520,54 +2435,123 @@ struct NotesSidebarTree: View {
         .contentShape(Rectangle())
     }
 
+    private func noteIcon(locked: Bool, pageCount: Int) -> some View {
+        let count = min(max(1, pageCount), maxPageIcons)
+        return ZStack(alignment: .leading) {
+            ForEach(0..<count, id: \.self) { index in
+                let offsetIndex = count - 1 - index
+                let isTop = index == 0
+                Image(systemName: isTop ? (locked ? "lock.fill" : "text.page") : "text.page")
+                    .foregroundStyle(isTop ? (locked ? .secondary : .primary) : .secondary)
+                    .frame(width: 16, height: 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(Color(NSColor.windowBackgroundColor))
+                            .frame(width: 11, height: 14)
+                    )
+                    .offset(x: CGFloat(offsetIndex) * 2, y: CGFloat(offsetIndex) * -1)
+                    .zIndex(Double(count - index))
+            }
+        }
+    }
+
+    private func noteIconWidth(pageCount: Int) -> CGFloat {
+        let count = min(max(1, pageCount), maxPageIcons)
+        return 16 + CGFloat(count - 1) * 2
+    }
+
+    private func notePageCount(_ note: NoteItem) -> Int {
+        let content = (note.title + "\n" + note.bodyTextWithoutImages)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return 1 }
+        let charCount = content.count
+        return max(1, Int(ceil(Double(charCount) / Double(standardPageCharacterCount))))
+    }
+
     // MARK: Selection helpers (adjust to match your NotesSelection)
 
-    private func isSelected(stack: UUID?, notebook: UUID?, section: UUID?, note: UUID?) -> Bool {
+    private func isSelected(area: UUID?, stack: UUID?, notebook: UUID?, section: UUID?, note: UUID?) -> Bool {
         let sel = store.doc.notes.selection
-        return sel.stackID == stack &&
+        return sel.areaID == area &&
+            sel.stackID == stack &&
             sel.notebookID == notebook &&
             sel.sectionID == section &&
             sel.noteID == note
     }
 
-    private func selectNote(stackID: UUID, notebookID: UUID, sectionID: UUID?, noteID: UUID) {
+    private func selectNote(areaID: UUID, stackID: UUID?, notebookID: UUID, sectionID: UUID?, noteID: UUID) {
+        store.doc.notes.selection.areaID = areaID
         store.doc.notes.selection.stackID = stackID
         store.doc.notes.selection.notebookID = notebookID
         store.doc.notes.selection.sectionID = sectionID
         store.doc.notes.selection.noteID = noteID
 
-        expandedStacks.insert(stackID)
+        expandedAreas.insert(areaID)
+        if let stackID { expandedStacks.insert(stackID) }
         expandedNotebooks.insert(notebookID)
         if let sectionID { expandedSections.insert(sectionID) }
     }
 
-    private func selectStackNote(stackID: UUID, noteID: UUID) {
+    private func selectAreaNote(areaID: UUID, noteID: UUID) {
+        store.doc.notes.selection.areaID = areaID
+        store.doc.notes.selection.stackID = nil
+        store.doc.notes.selection.notebookID = nil
+        store.doc.notes.selection.sectionID = nil
+        store.doc.notes.selection.noteID = noteID
+        expandedAreas.insert(areaID)
+    }
+
+    private func selectStackNote(areaID: UUID, stackID: UUID, noteID: UUID) {
+        store.doc.notes.selection.areaID = areaID
         store.doc.notes.selection.stackID = stackID
         store.doc.notes.selection.notebookID = nil
         store.doc.notes.selection.sectionID = nil
         store.doc.notes.selection.noteID = noteID
+        expandedAreas.insert(areaID)
         expandedStacks.insert(stackID)
     }
 
     /// Selects a note anywhere in the workspace and ensures its containers are expanded.
     private func selectNoteByID(_ noteID: UUID) {
-        for stack in store.doc.notes.stacks {
-            // Stack-level note
-            if stack.notes.contains(where: { $0.id == noteID }) {
-                selectStackNote(stackID: stack.id, noteID: noteID)
+        for area in store.doc.notes.areas {
+            // Area-level note
+            if area.notes.contains(where: { $0.id == noteID }) {
+                selectAreaNote(areaID: area.id, noteID: noteID)
                 return
             }
 
-            // Notebook + section notes
-            for notebook in stack.notebooks {
+            // Area notebooks
+            for notebook in area.notebooks {
                 if notebook.notes.contains(where: { $0.id == noteID }) {
-                    selectNote(stackID: stack.id, notebookID: notebook.id, sectionID: nil, noteID: noteID)
+                    selectNote(areaID: area.id, stackID: nil, notebookID: notebook.id, sectionID: nil, noteID: noteID)
                     return
                 }
                 for section in notebook.sections {
                     if section.notes.contains(where: { $0.id == noteID }) {
-                        selectNote(stackID: stack.id, notebookID: notebook.id, sectionID: section.id, noteID: noteID)
+                        selectNote(areaID: area.id, stackID: nil, notebookID: notebook.id, sectionID: section.id, noteID: noteID)
                         return
+                    }
+                }
+            }
+
+            for stack in area.stacks {
+                // Stack-level note
+                if stack.notes.contains(where: { $0.id == noteID }) {
+                    selectStackNote(areaID: area.id, stackID: stack.id, noteID: noteID)
+                    return
+                }
+
+                // Notebook + section notes
+                for notebook in stack.notebooks {
+                    if notebook.notes.contains(where: { $0.id == noteID }) {
+                        selectNote(areaID: area.id, stackID: stack.id, notebookID: notebook.id, sectionID: nil, noteID: noteID)
+                        return
+                    }
+                    for section in notebook.sections {
+                        if section.notes.contains(where: { $0.id == noteID }) {
+                            selectNote(areaID: area.id, stackID: stack.id, notebookID: notebook.id, sectionID: section.id, noteID: noteID)
+                            return
+                        }
                     }
                 }
             }
@@ -1584,6 +2568,12 @@ struct NotesSidebarTree: View {
         stack.notes.count + stack.notebooks.reduce(0) { $0 + notebookNoteCount($1) }
     }
 
+    private func areaNoteCount(_ area: NoteArea) -> Int {
+        area.notes.count
+            + area.notebooks.reduce(0) { $0 + notebookNoteCount($1) }
+            + area.stacks.reduce(0) { $0 + stackNoteCount($1) }
+    }
+
     // MARK: Search helpers
 
     private func performSearch() {
@@ -1596,19 +2586,19 @@ struct NotesSidebarTree: View {
         let queryLower = trimmed.lowercased()
         var results: [NoteSearchResult] = []
 
-        for stack in store.doc.notes.stacks {
-            let stackPath = "Stack: \(stack.title)"
+        for area in store.doc.notes.areas {
+            let areaPath = "Area: \(area.title)"
 
-            // Stack-level notes
-            for note in stack.notes {
-                if let hit = score(note: note, path: stackPath, queryLower: queryLower, queryOriginal: trimmed) {
+            // Area-level notes
+            for note in area.notes {
+                if let hit = score(note: note, path: areaPath, queryLower: queryLower, queryOriginal: trimmed) {
                     results.append(hit)
                 }
             }
 
-            // Notebook + section notes
-            for notebook in stack.notebooks {
-                let notebookPath = "\(stackPath) > Notebook: \(notebook.title)"
+            // Area notebooks
+            for notebook in area.notebooks {
+                let notebookPath = "\(areaPath) > Notebook: \(notebook.title)"
 
                 for note in notebook.notes {
                     if let hit = score(note: note, path: notebookPath, queryLower: queryLower, queryOriginal: trimmed) {
@@ -1625,6 +2615,37 @@ struct NotesSidebarTree: View {
                     }
                 }
             }
+
+            for stack in area.stacks {
+                let stackPath = "\(areaPath) > Stack: \(stack.title)"
+
+                // Stack-level notes
+                for note in stack.notes {
+                    if let hit = score(note: note, path: stackPath, queryLower: queryLower, queryOriginal: trimmed) {
+                        results.append(hit)
+                    }
+                }
+
+                // Stack notebooks
+                for notebook in stack.notebooks {
+                    let notebookPath = "\(stackPath) > Notebook: \(notebook.title)"
+
+                    for note in notebook.notes {
+                        if let hit = score(note: note, path: notebookPath, queryLower: queryLower, queryOriginal: trimmed) {
+                            results.append(hit)
+                        }
+                    }
+
+                    for section in notebook.sections {
+                        let sectionPath = "\(notebookPath) > Section: \(section.title)"
+                        for note in section.notes {
+                            if let hit = score(note: note, path: sectionPath, queryLower: queryLower, queryOriginal: trimmed) {
+                                results.append(hit)
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         results.sort { $0.score > $1.score }
@@ -1633,7 +2654,7 @@ struct NotesSidebarTree: View {
 
     private func score(note: NoteItem, path: String, queryLower: String, queryOriginal: String) -> NoteSearchResult? {
         let titleLower = note.displayTitle.lowercased()
-        let bodyLower = note.body.lowercased()
+        let bodyLower = note.bodyTextWithoutImages.lowercased()
         let pathLower = path.lowercased()
 
         var score = 0
@@ -1643,7 +2664,7 @@ struct NotesSidebarTree: View {
 
         guard score > 0 else { return nil }
 
-        let body = note.body
+        let body = note.bodyTextWithoutImages
         let snippet: String
         if let range = body.range(of: queryOriginal, options: .caseInsensitive) {
             let startOffset = body.distance(from: body.startIndex, to: range.lowerBound)
@@ -1688,24 +2709,33 @@ struct NotesSidebarTree: View {
 
     // MARK: Create ops (wire these to your existing functions)
 
-    private func createStack() {
-        store.addStack(title: "New Stack") // adjust signature if needed
+    private func createArea() {
+        store.addArea(title: "New Area")
     }
 
-    private func createNotebook(stackID: UUID) {
-        store.addNotebook(stackID: stackID, title: "New Notebook")
+    private func createStack(areaID: UUID) {
+        store.addStack(areaID: areaID, title: "New Stack")
+        expandedAreas.insert(areaID)
     }
 
-    private func createSection(stackID: UUID, notebookID: UUID) {
-        store.addSection(stackID: stackID, notebookID: notebookID, title: "New Section")
-        expandedStacks.insert(stackID)
+    private func createNotebook(areaID: UUID, stackID: UUID?) {
+        store.addNotebook(areaID: areaID, stackID: stackID, title: "New Notebook")
+        expandedAreas.insert(areaID)
+        if let stackID { expandedStacks.insert(stackID) }
+    }
+
+    private func createSection(areaID: UUID, stackID: UUID?, notebookID: UUID) {
+        store.addSection(areaID: areaID, stackID: stackID, notebookID: notebookID, title: "New Section")
+        expandedAreas.insert(areaID)
+        if let stackID { expandedStacks.insert(stackID) }
         expandedNotebooks.insert(notebookID)
     }
 
-    private func createNote(stackID: UUID, notebookID: UUID, sectionID: UUID?) {
-        store.addNote(stackID: stackID, notebookID: notebookID, sectionID: sectionID, title: "New Note")
-        expandedStacks.insert(stackID)
-        expandedNotebooks.insert(notebookID)
+    private func createNote(areaID: UUID, stackID: UUID?, notebookID: UUID?, sectionID: UUID?) {
+        store.addNote(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: sectionID, title: "New Note")
+        expandedAreas.insert(areaID)
+        if let stackID { expandedStacks.insert(stackID) }
+        if let notebookID { expandedNotebooks.insert(notebookID) }
         if let sectionID { expandedSections.insert(sectionID) }
     }
 
@@ -1743,7 +2773,7 @@ private struct NotesSearchView: View {
                 }
 
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Type to search across all stacks, notebooks, sections, and notes.")
+                Text("Type to search across all areas, stacks, notebooks, sections, and notes.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 Spacer()

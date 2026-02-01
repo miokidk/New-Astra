@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import AVFoundation
 import AstraBoard // Assuming the module name is AstraBoard
 
 
@@ -28,14 +27,10 @@ extension FocusedValues {
 @MainActor
 final class AstraAppModel: ObservableObject {
     let persistence = PersistenceService()
-    let aiService = AIService()
-    let webSearchService = WebSearchService()
     let authService = AuthService()
     lazy var voiceStore: BoardStore = BoardStore(
         boardID: defaultBoardId,
         persistence: persistence,
-        aiService: aiService,
-        webSearchService: webSearchService,
         authService: authService
     )
     @Published private(set) var isWakeListening: Bool = false
@@ -162,8 +157,6 @@ struct BoardRootView: View {
         _store = StateObject(wrappedValue: BoardStore(
             boardID: boardID,
             persistence: appModel.persistence,
-            aiService: appModel.aiService,
-            webSearchService: appModel.webSearchService,
             authService: appModel.authService
         ))
     }
@@ -347,9 +340,6 @@ struct MainView: View {
     @State private var activeTextEdit: UUID?
     @State private var chatInput: String = ""
     @State private var previousActiveTextEdit: UUID?
-    @State private var showingCameraCapture = false
-    @State private var pendingCameraMessage: String?
-    @State private var pendingCameraVoiceInput = false
     
     @State private var toolPaletteFrame: CGRect = .zero
     @State private var toolPaletteSize: CGSize = .zero
@@ -376,8 +366,7 @@ struct MainView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 workspaceLayer
-                toolPaletteOverlay(in: geo)
-
+                
                 FloatingPanelHostView(chatInput: $chatInput, onSend: submitChat)
                     .zIndex(10)
 
@@ -395,6 +384,9 @@ struct MainView: View {
                     .padding(10)
                     .zIndex(30)
                 }
+            }
+            .overlay(alignment: .topLeading) {
+                toolPaletteOverlay(in: geo)
             }
             .background(Color(NSColor.windowBackgroundColor))
             .background(
@@ -448,20 +440,6 @@ struct MainView: View {
             }
             previousActiveTextEdit = newValue
         }
-        .sheet(isPresented: $showingCameraCapture, onDismiss: handleCameraCancel) {
-            CameraCaptureSheet(
-                onCapture: { data in handleCameraCapture(data) },
-                onCancel: { handleCameraCancel() }
-            )
-        }
-        .onChange(of: store.doc.pendingClarification?.createdAt) { _ in
-            guard let pending = store.doc.pendingClarification else { return }
-            guard pending.question.contains("[[REQUEST_CAMERA]]") else { return }
-
-            let originalText = pending.originalText
-            store.doc.pendingClarification = nil
-            beginCameraCapture(for: originalText, voiceInput: false)
-        }
     }
 
     @ViewBuilder
@@ -483,18 +461,19 @@ struct MainView: View {
                 let padding: CGFloat = 8
                 let offsetFromCursor: CGFloat = 12
 
+                // Clamp position to keep palette within bounds
                 let x = min(max(raw.x + offsetFromCursor, padding),
                             geo.size.width - menuSize.width - padding)
                 let y = min(max(raw.y + offsetFromCursor, padding),
                             geo.size.height - menuSize.height - padding)
 
                 ToolPaletteView()
-                    .position(x: x + menuSize.width / 2, y: y + menuSize.height / 2)
+                    .offset(x: x, y: y)
                     .background(
                         GeometryReader { proxy in
                             Color.clear.preference(
                                 key: ToolPaletteFrameKey.self,
-                                value: proxy.frame(in: .named("MainViewSpace"))
+                                value: CGRect(x: x, y: y, width: proxy.size.width, height: proxy.size.height)
                             )
                         }
                     )
@@ -543,12 +522,6 @@ struct MainView: View {
         let imageAttachments = store.chatDraftImages
         let fileAttachments = store.chatDraftFiles
         if !trimmed.isEmpty || !imageAttachments.isEmpty || !fileAttachments.isEmpty {
-            if shouldTriggerCameraCapture(for: trimmed,
-                                          imageAttachments: imageAttachments,
-                                          fileAttachments: fileAttachments) {
-                beginCameraCapture(for: chatInput, voiceInput: voiceInput)
-                return
-            }
             let text = chatInput
             let didSend = store.sendChat(text: text,
                                          images: imageAttachments,
@@ -565,154 +538,6 @@ struct MainView: View {
         } else {
             chatInput = ""
         }
-    }
-
-    private func shouldTriggerCameraCapture(for text: String,
-                                            imageAttachments: [ImageRef],
-                                            fileAttachments: [FileRef]) -> Bool {
-        guard store.doc.pendingClarification == nil else { return false }
-        guard imageAttachments.isEmpty, fileAttachments.isEmpty else { return false }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let normalized = normalizedCameraPrompt(trimmed)
-        guard !normalized.isEmpty else { return false }
-
-        let exactTriggers: Set<String> = [
-            "look at this",
-            "look at that",
-            "what is this",
-            "whats this",
-            "what is that",
-            "whats that",
-            "what am i looking at",
-            "what am i seeing",
-            "do you see this",
-            "do you see that",
-            "can you see this",
-            "can you see that",
-            "identify this",
-            "identify that",
-            "check this out",
-            "tell me what this is",
-            "any idea what this is",
-            "what do you see",
-            "what do you see here"
-        ]
-        if exactTriggers.contains(normalized) {
-            return true
-        }
-
-        let prefixTriggers = [
-            "what is this",
-            "whats this",
-            "what is that",
-            "whats that",
-            "look at this",
-            "look at that"
-        ]
-        let wordCount = normalized.split(separator: " ").count
-        if wordCount <= 6, prefixTriggers.contains(where: { normalized.hasPrefix($0) }) {
-            return true
-        }
-
-        return false
-    }
-
-    private func normalizedCameraPrompt(_ text: String) -> String {
-        var normalized = text.lowercased()
-        normalized = normalized.replacingOccurrences(of: "'", with: "")
-        normalized = normalized.replacingOccurrences(of: "[^a-z0-9\\s]", with: " ",
-                                                     options: .regularExpression)
-        normalized = normalized.replacingOccurrences(of: "\\s+", with: " ",
-                                                     options: .regularExpression)
-        return normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func beginCameraCapture(for text: String, voiceInput: Bool) {
-        guard pendingCameraMessage == nil else { return }
-        guard AVCaptureDevice.default(for: .video) != nil else {
-            store.chatWarning = "Camera not available on this device."
-            if voiceInput {
-                store.endVoiceConversation()
-            }
-            return
-        }
-
-        pendingCameraMessage = text
-        pendingCameraVoiceInput = voiceInput
-        store.chatWarning = nil
-
-        let status = AVCaptureDevice.authorizationStatus(for: .video)
-        switch status {
-        case .authorized:
-            showingCameraCapture = true
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { granted in
-                DispatchQueue.main.async {
-                    if granted {
-                        showingCameraCapture = true
-                    } else {
-                        let shouldEndVoice = pendingCameraVoiceInput
-                        pendingCameraMessage = nil
-                        pendingCameraVoiceInput = false
-                        store.chatWarning = "Camera access denied. Enable it in Settings to use visual questions."
-                        if shouldEndVoice {
-                            store.endVoiceConversation()
-                        }
-                    }
-                }
-            }
-        case .denied, .restricted:
-            pendingCameraMessage = nil
-            pendingCameraVoiceInput = false
-            store.chatWarning = "Camera access denied. Enable it in Settings to use visual questions."
-            if voiceInput {
-                store.endVoiceConversation()
-            }
-        @unknown default:
-            pendingCameraMessage = nil
-            pendingCameraVoiceInput = false
-            store.chatWarning = "Camera access unavailable."
-            if voiceInput {
-                store.endVoiceConversation()
-            }
-        }
-    }
-
-    private func handleCameraCapture(_ data: Data) {
-        showingCameraCapture = false
-        guard let text = pendingCameraMessage else { return }
-        let voiceInput = pendingCameraVoiceInput
-        pendingCameraMessage = nil
-        pendingCameraVoiceInput = false
-
-        guard let ref = store.saveImage(data: data, ext: "jpg") else {
-            store.chatWarning = "Failed to save the camera image."
-            if voiceInput {
-                store.endVoiceConversation()
-            }
-            return
-        }
-
-        let didSend = store.sendChat(text: text,
-                                     images: [ref],
-                                     files: [],
-                                     voiceInput: voiceInput)
-        if didSend {
-            chatInput = ""
-            store.clearChatDraftImages()
-            store.clearChatDraftFiles()
-        }
-    }
-
-    private func handleCameraCancel() {
-        guard pendingCameraMessage != nil else { return }
-        showingCameraCapture = false
-        pendingCameraMessage = nil
-        if pendingCameraVoiceInput {
-            store.endVoiceConversation()
-        }
-        pendingCameraVoiceInput = false
     }
 
 }
@@ -944,183 +769,5 @@ struct PastingChatTextView: NSViewRepresentable {
             if onPasteImage?() == true { return }
             super.paste(sender)
         }
-    }
-}
-
-private struct CameraCaptureSheet: View {
-    @StateObject private var model: CameraCaptureModel
-    let onCapture: (Data) -> Void
-    let onCancel: () -> Void
-
-    init(onCapture: @escaping (Data) -> Void, onCancel: @escaping () -> Void) {
-        self.onCapture = onCapture
-        self.onCancel = onCancel
-        _model = StateObject(wrappedValue: CameraCaptureModel(onCapture: onCapture))
-    }
-
-    var body: some View {
-        ZStack {
-            if let msg = model.errorMessage {
-                VStack(spacing: 12) {
-                    Text(msg).font(.headline)
-                    Button("Close") { onCancel() }
-                }
-                .padding(20)
-            } else {
-                CameraPreviewView(session: model.session)
-                    .ignoresSafeArea()
-            }
-
-            VStack {
-                HStack {
-                    Button("Cancel") {
-                        model.stop()
-                        onCancel()
-                    }
-                    .padding(12)
-
-                    Spacer()
-                }
-
-                Spacer()
-
-                Button {
-                    model.capturePhoto()
-                } label: {
-                    Image(systemName: "circle.inset.filled")
-                        .font(.system(size: 56, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 18)
-            }
-        }
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
-        .frame(minWidth: 700, minHeight: 520)
-    }
-}
-
-private final class CameraCaptureModel: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate {
-    let session = AVCaptureSession()
-    @Published var errorMessage: String?
-
-    private let output = AVCapturePhotoOutput()
-    private let onCapture: (Data) -> Void
-    private var isConfigured = false
-
-    init(onCapture: @escaping (Data) -> Void) {
-        self.onCapture = onCapture
-    }
-
-    func start() {
-        configureSessionIfNeeded()
-        guard errorMessage == nil else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self, !self.session.isRunning else { return }
-            self.session.startRunning()
-        }
-    }
-
-    func stop() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self, self.session.isRunning else { return }
-            self.session.stopRunning()
-        }
-    }
-
-    func capturePhoto() {
-        guard errorMessage == nil else { return }
-        let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
-        output.capturePhoto(with: settings, delegate: self)
-    }
-
-    func photoOutput(_ output: AVCapturePhotoOutput,
-                     didFinishProcessingPhoto photo: AVCapturePhoto,
-                     error: Error?) {
-        if let error {
-            DispatchQueue.main.async {
-                self.errorMessage = "Capture failed: \(error.localizedDescription)"
-            }
-            return
-        }
-        guard let data = photo.fileDataRepresentation() else {
-            DispatchQueue.main.async {
-                self.errorMessage = "Unable to read the captured photo."
-            }
-            return
-        }
-        DispatchQueue.main.async {
-            self.onCapture(data)
-        }
-    }
-
-    private func configureSessionIfNeeded() {
-        guard !isConfigured else { return }
-        isConfigured = true
-        session.beginConfiguration()
-        session.sessionPreset = .photo
-
-        defer { session.commitConfiguration() }
-
-        guard let device = AVCaptureDevice.default(for: .video) else {
-            errorMessage = "No camera available."
-            return
-        }
-
-        do {
-            let input = try AVCaptureDeviceInput(device: device)
-            guard session.canAddInput(input) else {
-                errorMessage = "Camera input unavailable."
-                return
-            }
-            session.addInput(input)
-        } catch {
-            errorMessage = "Unable to access the camera."
-            return
-        }
-
-        guard session.canAddOutput(output) else {
-            errorMessage = "Camera output unavailable."
-            return
-        }
-        session.addOutput(output)
-    }
-}
-
-private struct CameraPreviewView: NSViewRepresentable {
-    let session: AVCaptureSession
-
-    func makeNSView(context: Context) -> CameraPreviewContainer {
-        CameraPreviewContainer(session: session)
-    }
-
-    func updateNSView(_ nsView: CameraPreviewContainer, context: Context) {
-        nsView.updateSession(session)
-    }
-}
-
-private final class CameraPreviewContainer: NSView {
-    private let previewLayer: AVCaptureVideoPreviewLayer
-
-    init(session: AVCaptureSession) {
-        previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspectFill
-        super.init(frame: .zero)
-        wantsLayer = true
-        layer = previewLayer
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func updateSession(_ session: AVCaptureSession) {
-        previewLayer.session = session
-    }
-
-    override func layout() {
-        super.layout()
-        previewLayer.frame = bounds
     }
 }
