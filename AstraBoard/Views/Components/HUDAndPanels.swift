@@ -877,6 +877,45 @@ struct ChatPanelView: View {
     @State private var findMatches: [UUID] = []
     @State private var findIndex: Int = 0
     @State private var pendingFindCommand: FindCommand?
+    
+    @State private var autoScrollWorkItem: DispatchWorkItem?
+    @State private var lastStreamScrollAt: CFTimeInterval = 0
+    @State private var allowPinnedRecompute: Bool = false
+    @State private var scrollInteractionReset: DispatchWorkItem?
+
+    private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        autoScrollWorkItem?.cancel()
+
+        let item = DispatchWorkItem {
+            if animated {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                }
+            } else {
+                var txn = Transaction()
+                txn.disablesAnimations = true
+                withTransaction(txn) {
+                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                }
+            }
+        }
+
+        autoScrollWorkItem = item
+        // small delay = lets layout settle + coalesces rapid token updates
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
+    }
+    
+    private func noteUserScrollInteraction() {
+        allowPinnedRecompute = true
+        scrollInteractionReset?.cancel()
+
+        let item = DispatchWorkItem {
+            allowPinnedRecompute = false
+        }
+        scrollInteractionReset = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
 
     private enum FindCommand: Equatable {
         case open
@@ -887,9 +926,15 @@ struct ChatPanelView: View {
 
     // "As soon as the user scrolls up from bottom" => basically zero tolerance,
     // but keep 1pt to avoid float jitter.
-    private let pinThreshold: CGFloat = 1
+    private let pinThreshold: CGFloat = 12
 
     private func recomputePinnedState() {
+        // While streaming, geometry can jitter as text grows; only recompute pin state
+        // if the user is actively scrolling (we detect via HUDScrollCapture).
+        if store.pendingChatReplies > 0 && !allowPinnedRecompute {
+            return
+        }
+
         guard viewportHeight > 0 else { return }
         let distanceFromBottom = bottomMaxY - viewportHeight
         let pinnedNow = distanceFromBottom <= pinThreshold
@@ -897,7 +942,7 @@ struct ChatPanelView: View {
             isPinnedToBottom = pinnedNow
         }
     }
-
+    
     private func rebuildFindMatches() {
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else {
@@ -1021,7 +1066,7 @@ struct ChatPanelView: View {
                         VStack(alignment: .leading, spacing: 14) {
                             ForEach(Array(store.doc.chat.messages.enumerated()), id: \.element.id) { index, msg in
                                 let canRetry = false
-                                let canEdit = store.pendingChatReplies == 0
+                                let canEdit = store.pendingChatReplies == 0 && msg.role == .user
                                 let isStreamingAssistant = store.pendingChatReplies > 0 &&
                                     index == store.doc.chat.messages.count - 1 &&
                                     msg.role == .assistant
@@ -1040,12 +1085,6 @@ struct ChatPanelView: View {
                                     onToggleThinking: { store.chatThinkingExpanded.toggle() }
                                 )
                                 .id(msg.id)
-
-                                if index != store.doc.chat.messages.count - 1 {
-                                    Rectangle()
-                                        .fill(Color(NSColor.separatorColor))
-                                        .frame(height: 1)
-                                }
                             }
 
                             // Bottom sentinel: used for both "scrollTo bottom" and "am I at bottom?"
@@ -1066,8 +1105,15 @@ struct ChatPanelView: View {
                     }
                     .coordinateSpace(name: "chatScroll")
                     .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(key: ChatViewportHeightKey.self, value: geo.size.height)
+                        ZStack {
+                            GeometryReader { geo in
+                                Color.clear.preference(key: ChatViewportHeightKey.self, value: geo.size.height)
+                            }
+
+                            HUDScrollCapture { _, _ in
+                                noteUserScrollInteraction()
+                            }
+                            .allowsHitTesting(false)
                         }
                     )
                     .onPreferenceChange(ChatViewportHeightKey.self) { h in
@@ -1080,17 +1126,22 @@ struct ChatPanelView: View {
                     }
                     .onChange(of: store.doc.chat.messages.count) { _ in
                         guard isPinnedToBottom else { return }
-                        withAnimation {
-                            proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
-                        }
+                        scheduleScrollToBottom(proxy, animated: true)
                     }
                     .onChange(of: lastMessageText) { _ in
-                        // Streaming updates: keep it pinned ONLY if user hasn't scrolled up.
                         guard isPinnedToBottom else { return }
-                        proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+
+                        // Throttle streaming scroll calls (tokens can update extremely fast).
+                        let now = CACurrentMediaTime()
+                        if now - lastStreamScrollAt < 0.08 { return }
+                        lastStreamScrollAt = now
+
+                        scheduleScrollToBottom(proxy, animated: false)
                     }
                     .onAppear {
-                        proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                        DispatchQueue.main.async {
+                            scheduleScrollToBottom(proxy, animated: false)
+                        }
                     }
                     .onChange(of: findQuery) { _ in
                         rebuildFindMatches()
@@ -1099,6 +1150,11 @@ struct ChatPanelView: View {
                         guard let cmd else { return }
                         applyFindCommand(cmd, proxy: proxy)
                         pendingFindCommand = nil
+                    }
+                    .onChange(of: isPinnedToBottom) { pinned in
+                        if !pinned {
+                            autoScrollWorkItem?.cancel()
+                        }
                     }
                 }
             }
@@ -1296,6 +1352,578 @@ private struct ChatActivityStatusView: View {
     }
 }
 
+// MARK: - Markdown Tables
+
+private struct ChatMarkdownTableView: View {
+    let markdownTable: String
+    let basePointSize: CGFloat
+    let textColor: Color
+    
+    private let gridLineOpacity: CGFloat = 0.95
+    private let gridLineWidth: CGFloat = 1
+    private var gridLineColor: Color {
+        Color(NSColor.separatorColor).opacity(gridLineOpacity)
+    }
+    
+    private struct CellID: Hashable {
+        let row: Int   // Grid row index (0 = header, 1... = body)
+        let col: Int
+    }
+
+    private struct CellFramePrefKey: PreferenceKey {
+        static var defaultValue: [CellID: CGRect] = [:]
+        static func reduce(value: inout [CellID: CGRect], nextValue: () -> [CellID: CGRect]) {
+            value.merge(nextValue(), uniquingKeysWith: { $1 })
+        }
+    }
+
+    private struct SpanGroup: Hashable {
+        let col: Int
+        let startBodyRow: Int   // 0-based in parsed.rows
+        let endBodyRow: Int     // inclusive
+        let text: String
+        let align: ColAlign
+    }
+    
+    private func computeSpanGroups(
+        rows: [[String]],
+        colCount: Int,
+        rowSpanColumns: Set<Int>
+    ) -> [SpanGroup] {
+
+        guard !rows.isEmpty else { return [] }
+
+        var groups: [SpanGroup] = []
+
+        for c in 0..<colCount where rowSpanColumns.contains(c) {
+            var start = 0
+            while start < rows.count {
+                let startText = (rows[start].count > c ? rows[start][c] : "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // If empty, skip until we find a non-empty anchor
+                if startText.isEmpty {
+                    start += 1
+                    continue
+                }
+
+                var end = start
+                var i = start + 1
+                while i < rows.count {
+                    let t = (rows[i].count > c ? rows[i][c] : "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if t.isEmpty {
+                        end = i
+                        i += 1
+                    } else {
+                        break
+                    }
+                }
+
+                // Only treat it as a "span" if it actually spans > 1 row
+                if end > start {
+                    groups.append(
+                        SpanGroup(
+                            col: c,
+                            startBodyRow: start,
+                            endBodyRow: end,
+                            text: startText,
+                            align: .left // will override later from parsed.alignments
+                        )
+                    )
+                }
+
+                start = end + 1
+            }
+        }
+
+        return groups
+    }
+
+    private enum ColAlign { case left, center, right }
+    
+    // Which columns should visually "row-span" when cells are blank.
+    // 0 = first column ("Category")
+    private let rowSpanColumns: Set<Int> = [0]
+
+    var body: some View {
+        let parsed = parseMarkdownTable(markdownTable)
+        let totalRows = 1 + parsed.rows.count
+        let colWidths = computeColumnWidths(parsed)
+        let spanAnchors = computeSpanAnchors(parsed.rows, colCount: parsed.colCount, rowSpanColumns: rowSpanColumns)
+
+        ScrollView(.horizontal, showsIndicators: true) {
+            tableGrid(
+                parsed: parsed,
+                totalRows: totalRows,
+                colWidths: colWidths,
+                spanAnchors: spanAnchors
+            )
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(gridLineColor, lineWidth: gridLineWidth)
+        )
+    }
+    
+    @ViewBuilder
+    private func tableGrid(
+        parsed: ParsedTable,
+        totalRows: Int,
+        colWidths: [CGFloat],
+        spanAnchors: [[Int]]
+    ) -> some View {
+
+        Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+            tableHeaderRow(parsed: parsed, totalRows: totalRows, colWidths: colWidths)
+            tableBodyRows(parsed: parsed, totalRows: totalRows, colWidths: colWidths, spanAnchors: spanAnchors)
+        }
+        .padding(8)
+        .coordinateSpace(name: "mdTable")
+        .overlayPreferenceValue(CellFramePrefKey.self) { frames in
+            spanOverlay(frames: frames, parsed: parsed)
+        }
+    }
+
+    @ViewBuilder
+    private func tableHeaderRow(
+        parsed: ParsedTable,
+        totalRows: Int,
+        colWidths: [CGFloat]
+    ) -> some View {
+
+        GridRow {
+            ForEach(0..<parsed.colCount, id: \.self) { c in
+                tableCell(
+                    text: parsed.header[safe: c] ?? "",
+                    isHeader: true,
+                    rowIndex: 0,
+                    colIndex: c,
+                    isLastRow: totalRows == 1,
+                    isLastCol: c == parsed.colCount - 1,
+                    colAlign: parsed.alignments[safe: c] ?? .left,
+                    width: colWidths[safe: c] ?? 120
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tableBodyRows(
+        parsed: ParsedTable,
+        totalRows: Int,
+        colWidths: [CGFloat],
+        spanAnchors: [[Int]]
+    ) -> some View {
+
+        ForEach(Array(parsed.rows.enumerated()), id: \.offset) { (r, row) in
+            GridRow {
+                ForEach(0..<parsed.colCount, id: \.self) { c in
+                    bodyCell(
+                        bodyRowIndex: r,
+                        row: row,
+                        col: c,
+                        parsed: parsed,
+                        totalRows: totalRows,
+                        colWidths: colWidths,
+                        spanAnchors: spanAnchors
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func bodyCell(
+        bodyRowIndex: Int,
+        row: [String],
+        col: Int,
+        parsed: ParsedTable,
+        totalRows: Int,
+        colWidths: [CGFloat],
+        spanAnchors: [[Int]]
+    ) -> some View {
+
+        let anchor = spanAnchors[safe: bodyRowIndex]?[safe: col] ?? -1
+        let hasSpan = anchor >= 0
+        let isContinuation = hasSpan && anchor != bodyRowIndex
+        let isLastInSpan = hasSpan && (
+            bodyRowIndex == parsed.rows.count - 1 ||
+            (spanAnchors[safe: bodyRowIndex + 1]?[safe: col] ?? -1) != anchor
+        )
+
+        // zebra matches anchor row
+        let spanStripeRowIndex: Int? = hasSpan ? (anchor + 1) : nil // +1 because header is row 0
+        let isSpanCol = rowSpanColumns.contains(col)
+
+        // Only hide text if it's a continuation cell (empty cell extending a previous span)
+        // Show normal text for cells with content, even in span columns
+        let cellText = isContinuation ? "" : (row[safe: col] ?? "")
+
+        tableCell(
+            text: cellText,
+            isHeader: false,
+            rowIndex: bodyRowIndex + 1,
+            colIndex: col,
+            isLastRow: (bodyRowIndex + 1) == (totalRows - 1),
+            isLastCol: col == parsed.colCount - 1,
+            colAlign: parsed.alignments[safe: col] ?? .left,
+            width: colWidths[safe: col] ?? 120,
+            suppressBottomLine: hasSpan && !isLastInSpan,
+            stripeRowOverride: spanStripeRowIndex
+        )
+    }
+
+    @ViewBuilder
+    private func spanOverlay(frames: [CellID: CGRect], parsed: ParsedTable) -> some View {
+        let rawGroups = computeSpanGroups(
+            rows: parsed.rows,
+            colCount: parsed.colCount,
+            rowSpanColumns: rowSpanColumns
+        )
+
+        let groups: [SpanGroup] = rawGroups.map { g in
+            SpanGroup(
+                col: g.col,
+                startBodyRow: g.startBodyRow,
+                endBodyRow: g.endBodyRow,
+                text: g.text,
+                align: parsed.alignments[safe: g.col] ?? .left
+            )
+        }
+
+        ZStack(alignment: .topLeading) {
+            ForEach(groups, id: \.self) { g in
+                if let union = unionRect(for: g, frames: frames) {
+                    mergedSpanLabel(text: g.text, align: g.align)
+                        .frame(width: union.width, height: union.height, alignment: frameAlignment(g.align))
+                        .position(x: union.midX, y: union.midY)
+                }
+            }
+        }
+    }
+
+    private func unionRect(for g: SpanGroup, frames: [CellID: CGRect]) -> CGRect? {
+        let startGridRow = g.startBodyRow + 1
+        let endGridRow = g.endBodyRow + 1
+
+        var union: CGRect?
+        for r in startGridRow...endGridRow {
+            if let rect = frames[CellID(row: r, col: g.col)] {
+                union = union.map { $0.union(rect) } ?? rect
+            }
+        }
+        return union
+    }
+    
+    @ViewBuilder
+    private func mergedSpanLabel(text: String, align: ColAlign) -> some View {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let font = Font.custom("HelveticaNeue-Medium", size: basePointSize)
+
+        if let a = try? AttributedString(
+            markdown: trimmed.isEmpty ? " " : trimmed,
+            options: AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .full,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+        ) {
+            Text(a)
+                .font(font)
+                .foregroundColor(textColor)
+                .multilineTextAlignment(textAlignment(align))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+        } else {
+            Text(trimmed.isEmpty ? " " : trimmed)
+                .font(font)
+                .foregroundColor(textColor)
+                .multilineTextAlignment(textAlignment(align))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+        }
+    }
+
+    private func textAlignment(_ a: ColAlign) -> TextAlignment {
+        switch a {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+
+    // MARK: - Cell
+
+    private func tableCell(
+        text: String,
+        isHeader: Bool,
+        rowIndex: Int,
+        colIndex: Int,
+        isLastRow: Bool,
+        isLastCol: Bool,
+        colAlign: ColAlign,
+        width: CGFloat,
+        suppressBottomLine: Bool = false,
+        stripeRowOverride: Int? = nil
+    ) -> some View {
+
+        let stripeIndex = stripeRowOverride ?? rowIndex
+
+        let headerBG = Color(NSColor.controlBackgroundColor).opacity(0.35)
+        let zebraBG  = (stripeIndex % 2 == 0)
+            ? Color(NSColor.controlBackgroundColor).opacity(0.18)
+            : Color(NSColor.controlBackgroundColor).opacity(0.10)
+
+        return MarkdownCellText(
+            raw: text,
+            basePointSize: basePointSize,
+            textColor: textColor,
+            isHeader: isHeader,
+            colAlign: colAlign
+        )
+        .frame(width: width, alignment: frameAlignment(colAlign))
+        .padding(.vertical, 6)
+        .padding(.horizontal, 10)
+        .frame(maxHeight: .infinity, alignment: frameAlignment(colAlign))
+        .gridCellUnsizedAxes(.vertical)
+        .background(isHeader ? headerBG : zebraBG)
+        // Gridlines (draw bottom + trailing only; outer border comes from container)
+        .overlay(alignment: .bottom) {
+            if !isLastRow && !suppressBottomLine {
+                Rectangle()
+                    .fill(gridLineColor)
+                    .frame(height: gridLineWidth)
+            }
+        }
+        .overlay(alignment: .trailing) {
+            if !isLastCol {
+                Rectangle()
+                    .fill(gridLineColor)
+                    .frame(width: gridLineWidth)
+            }
+        }
+        .background(
+            GeometryReader { proxy in
+                if rowSpanColumns.contains(colIndex) {
+                    Color.clear
+                        .preference(
+                            key: CellFramePrefKey.self,
+                            value: [CellID(row: rowIndex, col: colIndex): proxy.frame(in: .named("mdTable"))]
+                        )
+                } else {
+                    Color.clear
+                }
+            }
+        )
+    }
+
+    private struct MarkdownCellText: View {
+        let raw: String
+        let basePointSize: CGFloat
+        let textColor: Color
+        let isHeader: Bool
+        let colAlign: ColAlign
+
+        var body: some View {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let font: Font = isHeader
+                ? .custom("HelveticaNeue-Medium", size: basePointSize)
+                : .custom("HelveticaNeue-Light", size: basePointSize)
+
+            if let a = markdownAttributedString(from: trimmed.isEmpty ? " " : trimmed) {
+                Text(a)
+                    .font(font)
+                    .foregroundColor(textColor)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(textAlignment(colAlign))
+                    .fixedSize(horizontal: false, vertical: true) // ✅ wraps instead of exploding width
+            } else {
+                Text(trimmed.isEmpty ? " " : trimmed)
+                    .font(font)
+                    .foregroundColor(textColor)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(textAlignment(colAlign))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        private func markdownAttributedString(from s: String) -> AttributedString? {
+            let options = AttributedString.MarkdownParsingOptions(
+                interpretedSyntax: .full,
+                failurePolicy: .returnPartiallyParsedIfPossible
+            )
+            return try? AttributedString(markdown: s, options: options)
+        }
+
+        private func textAlignment(_ a: ColAlign) -> TextAlignment {
+            switch a {
+            case .left: return .leading
+            case .center: return .center
+            case .right: return .trailing
+            }
+        }
+    }
+
+    private func frameAlignment(_ a: ColAlign) -> Alignment {
+        switch a {
+        case .left: return .leading
+        case .center: return .center
+        case .right: return .trailing
+        }
+    }
+    
+    private func computeSpanAnchors(
+        _ rows: [[String]],
+        colCount: Int,
+        rowSpanColumns: Set<Int>
+    ) -> [[Int]] {
+        guard !rows.isEmpty, colCount > 0 else { return [] }
+
+        var anchors = Array(repeating: Array(repeating: -1, count: colCount), count: rows.count)
+
+        for c in 0..<colCount {
+            // Only apply the rowspan illusion to selected columns
+            guard rowSpanColumns.contains(c) else { continue }
+
+            var lastNonEmptyRow: Int = -1
+
+            for r in 0..<rows.count {
+                let cell = (rows[r].count > c ? rows[r][c] : "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if !cell.isEmpty {
+                    lastNonEmptyRow = r
+                    anchors[r][c] = r
+                } else if lastNonEmptyRow >= 0 {
+                    anchors[r][c] = lastNonEmptyRow
+                } else {
+                    anchors[r][c] = -1
+                }
+            }
+        }
+
+        return anchors
+    }
+
+    // MARK: - Parsing
+
+    private struct ParsedTable {
+        let header: [String]
+        let alignments: [ColAlign]
+        let rows: [[String]]
+        let colCount: Int
+    }
+
+    private func parseMarkdownTable(_ block: String) -> ParsedTable {
+        let lines = block
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0) }
+
+        guard lines.count >= 2 else {
+            return ParsedTable(header: [], alignments: [], rows: [], colCount: 0)
+        }
+
+        let header = parseRow(lines[0])
+        let align = parseAlignmentRow(lines[1], expectedCols: header.count)
+        let rows = lines.dropFirst(2).map(parseRow)
+
+        let colCount = max(header.count, rows.map(\.count).max() ?? 0, align.count)
+
+        return ParsedTable(header: header, alignments: align, rows: rows, colCount: colCount)
+    }
+
+    private func parseRow(_ line: String) -> [String] {
+        var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("|") { t.removeFirst() }
+        if t.hasSuffix("|") { t.removeLast() }
+        return splitOnUnescapedPipes(t).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    private func parseAlignmentRow(_ line: String, expectedCols: Int) -> [ColAlign] {
+        let cells = parseRow(line)
+        var out: [ColAlign] = []
+        out.reserveCapacity(max(expectedCols, cells.count))
+
+        for cell in cells {
+            let s = cell.replacingOccurrences(of: " ", with: "")
+            let left = s.hasPrefix(":")
+            let right = s.hasSuffix(":")
+            if left && right { out.append(.center) }
+            else if right { out.append(.right) }
+            else { out.append(.left) }
+        }
+
+        if out.count < expectedCols {
+            out.append(contentsOf: Array(repeating: .left, count: expectedCols - out.count))
+        }
+        return out
+    }
+
+    private func splitOnUnescapedPipes(_ s: String) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var escaping = false
+
+        for ch in s {
+            if escaping {
+                current.append(ch)
+                escaping = false
+                continue
+            }
+            if ch == "\\" {
+                escaping = true
+                continue
+            }
+            if ch == "|" {
+                parts.append(current)
+                current = ""
+            } else {
+                current.append(ch)
+            }
+        }
+        parts.append(current)
+        return parts
+    }
+
+    // MARK: - Column widths (keeps it table-like)
+
+    private func computeColumnWidths(_ parsed: ParsedTable) -> [CGFloat] {
+        guard parsed.colCount > 0 else { return [] }
+
+        // Estimate width from max characters, but clamp so long cells wrap (table stays “table-y”).
+        let charW = max(6.0, basePointSize * 0.55) // rough Helvetica char width
+        let minW: CGFloat = 120
+        let maxW: CGFloat = 420  // key: prevents the “columns drift apart” look
+
+        var maxChars = Array(repeating: 0, count: parsed.colCount)
+
+        func consider(_ row: [String]) {
+            for c in 0..<parsed.colCount {
+                let s = row[safe: c] ?? ""
+                maxChars[c] = max(maxChars[c], s.count)
+            }
+        }
+
+        consider(parsed.header)
+        for r in parsed.rows { consider(r) }
+
+        return maxChars.map { ch in
+            let estimated = CGFloat(ch) * charW
+            return min(max(minW, estimated), maxW)
+        }
+    }
+}
+
+// If you already added this earlier, don’t duplicate it.
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        (indices.contains(index)) ? self[index] : nil
+    }
+}
+
 private struct ChatMessageRow: View {
     @EnvironmentObject var store: BoardStore
     @Environment(\.colorScheme) private var colorScheme
@@ -1310,10 +1938,134 @@ private struct ChatMessageRow: View {
 
     @State private var isEditing = false
     @State private var draftText = ""
+    
+    private func markdownText(for rawText: String) -> AttributedString? {
+        let source = markdownSource(for: rawText)
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .full,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        guard let parsed = try? AttributedString(markdown: source, options: options) else {
+            return nil
+        }
+        let sourceNewlines = source.filter { $0 == "\n" }.count
+        let parsedNewlines = parsed.characters.filter { $0.isNewline }.count
+        if sourceNewlines > 0, parsedNewlines < sourceNewlines {
+            return markdownPreservingNewlines(rawText)
+        }
+        return parsed
+    }
+
+    private func markdownSource(for rawText: String) -> String {
+        let lines = rawText.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
+        var output: [String] = []
+        var inCodeBlock = false
+        output.reserveCapacity(lines.count)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") {
+                inCodeBlock.toggle()
+                output.append(String(line))
+                continue
+            }
+            if inCodeBlock {
+                output.append(String(line))
+            } else if line.isEmpty {
+                output.append(String(line))
+            } else {
+                let processed = linkifyCitationsIfPossible(String(line))
+                output.append(processed + "  ")
+            }
+        }
+        return output.joined(separator: "\n")
+    }
+
+    private struct TableAwareBlock: Identifiable {
+        enum Kind { case text, table, horizontalRule }
+        let id = UUID()
+        let kind: Kind
+        let text: String
+    }
+
+    private func splitMarkdownIntoTableAwareBlocks(_ rawText: String) -> [TableAwareBlock] {
+        let ns = rawText as NSString
+        let full = NSRange(location: 0, length: ns.length)
+
+        // Don't treat tables inside fenced code blocks as real tables.
+        let codePattern = #"```[\s\S]*?```"#
+        let codeRanges: [NSRange] =
+            (try? NSRegularExpression(pattern: codePattern))?
+                .matches(in: rawText, range: full)
+                .map(\.range)
+            ?? []
+
+        // Matches horizontal rules: --- or *** or ___ (3 or more, with optional whitespace)
+        let hrPattern = #"(?m)^\s*([-*_])\1\1+\s*$"#
+        let hrRanges: [NSRange] =
+            (try? NSRegularExpression(pattern: hrPattern))?
+                .matches(in: rawText, range: full)
+                .filter { m in !codeRanges.contains { NSIntersectionRange($0, m.range).length > 0 } }
+                .map(\.range)
+            ?? []
+
+        // Matches a full Markdown table block (header + separator + rows)
+        let pattern = #"(?m)(^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$\n(^\s*\|.*\|\s*$\n?)*)"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else {
+            return [TableAwareBlock(kind: .text, text: rawText)]
+        }
+
+        let tableMatches = re.matches(in: rawText, range: full).filter { m in
+            !codeRanges.contains { NSIntersectionRange($0, m.range).length > 0 }
+        }
+
+        // Combine all special ranges (tables and horizontal rules)
+        struct SpecialBlock {
+            let range: NSRange
+            let kind: TableAwareBlock.Kind
+        }
+        
+        var specialBlocks: [SpecialBlock] = []
+        specialBlocks.append(contentsOf: tableMatches.map { SpecialBlock(range: $0.range, kind: .table) })
+        specialBlocks.append(contentsOf: hrRanges.map { SpecialBlock(range: $0, kind: .horizontalRule) })
+        specialBlocks.sort { $0.range.location < $1.range.location }
+
+        guard !specialBlocks.isEmpty else {
+            return [TableAwareBlock(kind: .text, text: rawText)]
+        }
+
+        var blocks: [TableAwareBlock] = []
+        var cursor = 0
+
+        for special in specialBlocks {
+            if special.range.location > cursor {
+                let before = ns.substring(with: NSRange(location: cursor, length: special.range.location - cursor))
+                if !before.isEmpty {
+                    blocks.append(TableAwareBlock(kind: .text, text: before))
+                }
+            }
+
+            let content = ns.substring(with: special.range)
+            if !content.isEmpty {
+                blocks.append(TableAwareBlock(kind: special.kind, text: content))
+            }
+
+            cursor = NSMaxRange(special.range)
+        }
+
+        if cursor < ns.length {
+            let tail = ns.substring(from: cursor)
+            if !tail.isEmpty {
+                blocks.append(TableAwareBlock(kind: .text, text: tail))
+            }
+        }
+
+        // Drop blocks that are only whitespace/newlines.
+        return blocks.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
 
     private enum ChatTypography {
         static let senderFont = ChatStyle.senderFont
-        static let messageFont: Font = .system(size: ChatStyle.basePointSize, weight: .regular)
+        static let messageFont: Font = .custom("HelveticaNeue-Light", size: ChatStyle.basePointSize)
         static let messageLineSpacing: CGFloat = 0
         static let editorMinHeight: CGFloat = 88
     }
@@ -1329,16 +2081,20 @@ private struct ChatMessageRow: View {
     }
 
     private func createMarkdownAttributedString() -> NSAttributedString {
-        guard let md = markdownText else {
-            return NSAttributedString(string: message.text)
+        createMarkdownAttributedString(from: message.text)
+    }
+
+    private func createMarkdownAttributedString(from rawText: String) -> NSAttributedString {
+        guard let md = markdownText(for: rawText) else {
+            return NSAttributedString(string: rawText)
         }
 
         let s = String(md.characters)
         let out = NSMutableAttributedString(md)
 
-        let baseSize: CGFloat = 17
-        let baseFont = NSFont.systemFont(ofSize: baseSize, weight: .regular)
-        
+        let baseSize: CGFloat = ChatStyle.basePointSize
+        let baseFont: NSFont = ChatStyle.baseFont
+
         let codeBg: NSColor = {
             if colorScheme == .dark {
                 return NSColor.white.withAlphaComponent(0.12)
@@ -1354,10 +2110,10 @@ private struct ChatMessageRow: View {
             let end = s.index(s.startIndex, offsetBy: upper)
             return NSRange(start..<end, in: s)
         }
-        
+
         // First pass: identify all code block ranges
         var codeBlockRanges: [NSRange] = []
-        
+
         for run in md.runs {
             if let intent = run.attributes.presentationIntent {
                 for c in intent.components {
@@ -1368,7 +2124,7 @@ private struct ChatMessageRow: View {
                 }
             }
         }
-        
+
         // Merge overlapping ranges
         codeBlockRanges.sort { $0.location < $1.location }
         var mergedRanges: [NSRange] = []
@@ -1392,8 +2148,8 @@ private struct ChatMessageRow: View {
                     if case .header(let level) = c.kind {
                         font = ChatStyle.headingFont(level: level)
                     }
-                    
-                    if case .codeBlock(let languageHint) = c.kind {
+
+                    if case .codeBlock(_) = c.kind {
                         isCodeBlock = true
                         font = NSFont.monospacedSystemFont(ofSize: max(12, baseSize - 2), weight: .regular)
                     }
@@ -1402,7 +2158,7 @@ private struct ChatMessageRow: View {
 
             if let inline = run.attributes.inlinePresentationIntent, !isCodeBlock {
                 if inline.contains(.stronglyEmphasized) {
-                    font = NSFont.systemFont(ofSize: font.pointSize, weight: .bold)
+                    font = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
                 }
                 if inline.contains(.emphasized) {
                     font = NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask)
@@ -1414,23 +2170,19 @@ private struct ChatMessageRow: View {
 
             out.addAttribute(.font, value: font, range: range)
         }
-        
+
         // Third pass: Apply code block styling with custom marker attribute
         for codeBlockRange in codeBlockRanges {
-            // IMPORTANT: Use custom attribute instead of .backgroundColor
-            // This prevents NSTextView from drawing the default rectangular background
             out.addAttribute(.codeBlockMarker, value: codeBg, range: codeBlockRange)
-            
-            // Apply uniform monospace font
+
             let codeFont = NSFont.monospacedSystemFont(ofSize: max(12, baseSize - 2), weight: .regular)
             out.addAttribute(.font, value: codeFont, range: codeBlockRange)
-            
-            // Add paragraph style with spacing
+
             let paragraphStyle = NSMutableParagraphStyle()
-            paragraphStyle.paragraphSpacingBefore = 12
-            paragraphStyle.paragraphSpacing = 12
-            paragraphStyle.lineSpacing = 3
-            
+            paragraphStyle.paragraphSpacingBefore = 6
+            paragraphStyle.paragraphSpacing = 6
+            paragraphStyle.lineSpacing = 2
+
             out.addAttribute(.paragraphStyle, value: paragraphStyle, range: codeBlockRange)
         }
 
@@ -1675,12 +2427,40 @@ private struct ChatMessageRow: View {
                         // NOTE: SwiftUI's `Text(AttributedString)` + `.textSelection(.enabled)`
                         // renders links with blue styling but doesn't reliably make them clickable
                         // on macOS. Use an NSTextView-backed renderer so links open in the browser.
-                        ChatRichTextView(
-                            attributedText: createMarkdownAttributedString(),
-                            baseFont: ChatStyle.baseFont,
-                            textColor: ChatStyle.baseColor,
-                            lineSpacing: 0
-                        )
+                        // Render tables as their own horizontally-scrollable blocks so they don't
+                        // "break" when the chat panel is narrow.
+                        let blocks = splitMarkdownIntoTableAwareBlocks(message.text)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(blocks) { block in
+                                switch block.kind {
+                                case .text:
+                                    // NOTE: SwiftUI's `Text(AttributedString)` + `.textSelection(.enabled)`
+                                    // renders links with blue styling but doesn't reliably make them clickable
+                                    // on macOS. Use an NSTextView-backed renderer so links open in the browser.
+                                    ChatRichTextView(
+                                        attributedText: createMarkdownAttributedString(from: block.text),
+                                        baseFont: ChatStyle.baseFont,
+                                        textColor: ChatStyle.baseColor,
+                                        lineSpacing: 0
+                                    )
+
+                                case .table:
+                                    ChatMarkdownTableView(
+                                        markdownTable: block.text,
+                                        basePointSize: ChatStyle.basePointSize,
+                                        textColor: Color(ChatStyle.baseColor)
+                                    )
+                                    
+                                case .horizontalRule:
+                                    // Render as a separator line that adapts to panel width
+                                    Rectangle()
+                                        .fill(Color(NSColor.separatorColor))
+                                        .frame(height: 1)
+                                        .padding(.vertical, 6)
+                                }
+                            }
+                        }
                     } else if let activityText, !activityText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         // Show activity status only if no message text yet
                         ChatActivityStatusView(text: activityText)
@@ -1725,6 +2505,7 @@ private struct ChatMessageRow: View {
                     }
                 }
             }
+            .frame(maxWidth: ChatStyle.maxMessageContentWidth, alignment: .leading)
             Spacer(minLength: 0)
         }
         .onAppear {
@@ -1863,14 +2644,20 @@ struct MarkdownText: View {
 
 private enum ChatStyle {
     // Chat-style defaults
-    static let basePointSize: CGFloat = 15.5
-    static let baseFont: NSFont = .systemFont(ofSize: basePointSize, weight: .regular)
+    static let basePointSize: CGFloat = 16
+    static let baseFont: NSFont = {
+        // Prefer Helvetica Neue Light; fall back safely.
+        if let f = NSFont(name: "Avenir-Next", size: basePointSize) { return f }
+        if let f = NSFont(name: "Avenir", size: basePointSize) { return f }
+        return NSFont.systemFont(ofSize: basePointSize, weight: .light)
+    }()
     static let baseColor: NSColor = .labelColor
 
-    // Readability
-    static let lineHeightMultiple: CGFloat = 1.22
-    static let paragraphSpacing: CGFloat = 8
-    static let paragraphSpacingBefore: CGFloat = 2
+    // Readability (tighter than before)
+    static let lineHeightMultiple: CGFloat = 1.15
+    static let paragraphSpacing: CGFloat = 2
+    static let paragraphSpacingBefore: CGFloat = 0
+    static let maxMessageContentWidth: CGFloat = 720
 
     // Container feel
     static let textInset = NSSize(width: 0, height: 2)
@@ -1879,15 +2666,15 @@ private enum ChatStyle {
     // Headings (relative, not huge)
     static func headingFont(level: Int) -> NSFont {
         switch level {
-        case 1: return .systemFont(ofSize: 22, weight: .bold)
-        case 2: return .systemFont(ofSize: 19, weight: .bold)
-        case 3: return .systemFont(ofSize: 17, weight: .semibold)
-        default: return .systemFont(ofSize: 16.5, weight: .semibold)
+        case 1: return NSFont.systemFont(ofSize: 22, weight: .bold)
+        case 2: return NSFont.systemFont(ofSize: 19, weight: .bold)
+        case 3: return NSFont.systemFont(ofSize: 17, weight: .semibold)
+        default: return NSFont.systemFont(ofSize: 16, weight: .semibold)
         }
     }
 
-    static let senderFont: Font = .system(size: 15, weight: .semibold)
-    static let timestampFont: Font = .system(size: 11, weight: .regular)
+    static let senderFont: Font = .custom("HelveticaNeue-Medium", size: 16)
+    static let timestampFont: Font = .custom("HelveticaNeue-Light", size: 11)
 }
 
 private class CodeBlockTextView: NSTextView {
@@ -3736,8 +4523,12 @@ private func replaceMarkdownTables(in mutable: NSMutableAttributedString,
         result.append(NSAttributedString(string: border(left: "┌", mid: "┬", right: "┐") + "\n", attributes: attrs))
         result.append(NSAttributedString(string: rowLine(header) + "\n", attributes: attrs))
         result.append(NSAttributedString(string: border(left: "├", mid: "┼", right: "┤") + "\n", attributes: attrs))
-        for r in bodyRows {
+        for (index, r) in bodyRows.enumerated() {
             result.append(NSAttributedString(string: rowLine(r) + "\n", attributes: attrs))
+            // Add divider between rows (but not after the last row)
+            if index < bodyRows.count - 1 {
+                result.append(NSAttributedString(string: border(left: "├", mid: "┼", right: "┤") + "\n", attributes: attrs))
+            }
         }
         result.append(NSAttributedString(string: border(left: "└", mid: "┴", right: "┘") + "\n", attributes: attrs))
 
@@ -3812,8 +4603,8 @@ private func styleBlockquotes(in mutable: NSMutableAttributedString,
 
         p.firstLineHeadIndent = 18
         p.headIndent = 18
-        p.paragraphSpacingBefore = 2
-        p.paragraphSpacing = 6
+        p.paragraphSpacingBefore = 1
+        p.paragraphSpacing = 2
 
         mutable.addAttribute(.paragraphStyle, value: p, range: paraRange)
     }
@@ -3881,8 +4672,8 @@ private func styleCodeFences(in mutable: NSMutableAttributedString,
         paragraphStyle.firstLineHeadIndent = 12
         paragraphStyle.headIndent = 12
         paragraphStyle.tailIndent = -12
-        paragraphStyle.paragraphSpacingBefore = 4
-        paragraphStyle.paragraphSpacing = 4
+        paragraphStyle.paragraphSpacingBefore = 2
+        paragraphStyle.paragraphSpacing = 2
         paragraphStyle.lineSpacing = 1
         
         let fullRange = NSRange(location: 0, length: result.length)

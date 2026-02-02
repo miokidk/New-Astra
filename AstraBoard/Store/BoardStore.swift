@@ -3252,25 +3252,15 @@ extension BoardStore {
             ts: now
         )
         
-        let assistantId = UUID()
-        let assistantMessage = ChatMsg(
-            id: assistantId,
-            role: .assistant,
-            text: "",
-            images: [],
-            files: [],
-            ts: now
-        )
-        
-        doc.chat.messages.append(contentsOf: [userMessage, assistantMessage])
+        doc.chat.messages.append(userMessage)
         touch()
         pendingChatReplies = 1
-        
+
         if !doc.ui.panels.chat.isOpen {
             chatNeedsAttention = true
         }
-        
-        startAssistantReplyWithTools(assistantMessageID: assistantId)
+
+        processChatReply()
 
         if voiceInput {
             endVoiceConversation()
@@ -3365,36 +3355,77 @@ extension BoardStore {
             var accumulated = ""
             var thinkingAccumulated = ""
             do {
-                try await self.chatService.stream(model: self.chatModelName, messages: requestMessages) { chunk in
-                    let delta = chunk.message?.content ?? ""
-                    if !delta.isEmpty {
-                        accumulated += delta
-                        await MainActor.run {
-                            self.updateChatMessageText(id: assistantMessageID, text: accumulated)
-                            if self.chatActivityStatus != nil {
-                                self.chatActivityStatus = nil
+                var conversation = requestMessages
+                var toolRoundTrips = 0
+                let maxToolRoundTrips = 5
+
+                while true {
+                    var capturedToolCall: ToolCall? = nil
+
+                    try await self.chatService.stream(model: self.chatModelName, messages: conversation) { chunk in
+                        // Normal assistant content streaming
+                        let delta = chunk.message?.content ?? ""
+                        if !delta.isEmpty {
+                            accumulated += delta
+                            await MainActor.run {
+                                self.updateChatMessageText(id: assistantMessageID, text: accumulated)
+                                if self.chatActivityStatus != nil {
+                                    self.chatActivityStatus = nil
+                                }
+                            }
+                        }
+
+                        // Thinking streaming
+                        if let thinking = chunk.message?.thinking ?? chunk.thinking {
+                            thinkingAccumulated += thinking
+                            await MainActor.run {
+                                self.chatThinkingText = thinkingAccumulated
+                            }
+                        }
+
+                        // Tool call capture
+                        if let tc = chunk.toolCall {
+                            capturedToolCall = tc
+                            await MainActor.run {
+                                self.chatActivityStatus = "Using tool: \(tc.name)…"
                             }
                         }
                     }
-                    if let thinking = chunk.message?.thinking ?? chunk.thinking {
-                        thinkingAccumulated += thinking
+
+                    // If no tool call happened, we're done.
+                    guard let toolCall = capturedToolCall else { break }
+
+                    toolRoundTrips += 1
+                    if toolRoundTrips > maxToolRoundTrips {
                         await MainActor.run {
-                            self.chatThinkingText = thinkingAccumulated
+                            self.updateChatMessageText(
+                                id: assistantMessageID,
+                                text: accumulated.isEmpty ? "Error: Tool loop exceeded safe limit." : accumulated
+                            )
                         }
+                        break
                     }
+
+                    // Execute tool
+                    let result = await ToolExecutor.execute(toolCall)
+
+                    // Feed tool result back into the model (your service already formats Tool Results into content)
+                    conversation.append(
+                        OllamaChatService.Message(
+                            role: "user",
+                            content: "Tool result for \(toolCall.name) (id: \(toolCall.id)):\n\(result.success ? result.result : (result.error ?? "Unknown error"))"
+                        )
+                    )
                 }
+
                 await MainActor.run {
                     self.finishChatReply()
                 }
             } catch {
                 if error is CancellationError {
-                    await MainActor.run {
-                        self.finishChatReply(canceled: true)
-                    }
+                    await MainActor.run { self.finishChatReply(canceled: true) }
                 } else {
-                    await MainActor.run {
-                        self.handleChatReplyError(for: assistantMessageID, error: error)
-                    }
+                    await MainActor.run { self.handleChatReplyError(for: assistantMessageID, error: error) }
                 }
             }
         }
@@ -5068,181 +5099,6 @@ extension BoardStore {
     }
 }
 
-extension BoardStore {
-    
-    /// Enhanced version of startAssistantReply that handles tool calls
-    func startAssistantReplyWithTools(assistantMessageID: UUID) {
-        print("✅ USING TOOL-ENABLED METHOD")
-        let requestMessages = requestMessagesForCurrentChat()
-        chatReplyTask?.cancel()
-        chatReplyTask = Task { [weak self] in
-            guard let self else { return }
-            
-            var accumulated = ""
-            var thinkingAccumulated = ""
-            var detectedToolCall: ToolCall?
-            
-            do {
-                // First stream from the model
-                try await self.chatService.stream(
-                    model: self.chatModelName,
-                    messages: requestMessages,
-                    includeSystemPrompt: true
-                ) { chunk in
-                    // Handle thinking
-                    if let thinking = chunk.message?.thinking ?? chunk.thinking {
-                        thinkingAccumulated += thinking
-                        await MainActor.run {
-                            self.chatThinkingText = thinkingAccumulated
-                        }
-                    }
-                    
-                    // Handle tool call detection
-                    if let toolCall = chunk.toolCall {
-                        detectedToolCall = toolCall
-                        await MainActor.run {
-                            self.chatActivityStatus = "Calling tool: \(toolCall.name)..."
-                        }
-                    }
-                    
-                    // Handle regular content
-                    let delta = chunk.message?.content ?? ""
-                    if !delta.isEmpty {
-                        accumulated += delta
-                        
-                        // Don't display raw JSON tool calls to user
-                        if !self.looksLikeToolCall(accumulated) {
-                            await MainActor.run {
-                                self.updateChatMessageText(id: assistantMessageID, text: accumulated)
-                                if self.chatActivityStatus != nil {
-                                    self.chatActivityStatus = nil
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // If a tool was called, execute it and continue the conversation
-                if let toolCall = detectedToolCall {
-                    await self.handleToolCall(
-                        toolCall: toolCall,
-                        assistantMessageID: assistantMessageID,
-                        previousMessages: requestMessages
-                    )
-                } else {
-                    await MainActor.run {
-                        self.finishChatReply()
-                    }
-                }
-                
-            } catch {
-                if error is CancellationError {
-                    await MainActor.run {
-                        self.finishChatReply(canceled: true)
-                    }
-                } else {
-                    await MainActor.run {
-                        self.handleChatReplyError(for: assistantMessageID, error: error)
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Handle execution of a tool call
-    private func handleToolCall(
-        toolCall: ToolCall,
-        assistantMessageID: UUID,
-        previousMessages: [OllamaChatService.Message]
-    ) async {
-        // Execute the tool
-        await MainActor.run {
-            self.chatActivityStatus = "Executing \(toolCall.name)..."
-        }
-        
-        let toolResult = await ToolExecutor.execute(toolCall)
-        
-        // If tool execution failed (e.g., no internet), inform the user
-        if !toolResult.success {
-            let errorMessage: String
-            if let error = toolResult.error, error.contains("No internet connection") {
-                errorMessage = "I'm sorry, but I cannot perform a search right now because there's no internet connection available."
-            } else {
-                errorMessage = "I encountered an error while trying to use the \(toolCall.name) tool: \(toolResult.error ?? "Unknown error")"
-            }
-            
-            await MainActor.run {
-                self.updateChatMessageText(id: assistantMessageID, text: errorMessage)
-                self.chatActivityStatus = nil
-                self.finishChatReply()
-            }
-            return
-        }
-        
-        // Create a new message with tool results and continue the conversation
-        await MainActor.run {
-            self.chatActivityStatus = "Processing results..."
-        }
-        
-        // Build messages including tool result
-        var messagesWithToolResult = previousMessages
-        
-        // Add a system message with the tool result
-        messagesWithToolResult.append(
-            OllamaChatService.Message(
-                role: "system",
-                content: "Tool execution result",
-                toolResults: [toolResult]
-            )
-        )
-        
-        // Continue streaming to get the model's response to the tool result
-        var finalResponse = ""
-        var thinkingAccumulated = ""
-        
-        do {
-            try await self.chatService.stream(
-                model: self.chatModelName,
-                messages: messagesWithToolResult,
-                includeSystemPrompt: false // Don't repeat system prompt
-            ) { chunk in
-                if let thinking = chunk.message?.thinking ?? chunk.thinking {
-                    thinkingAccumulated += thinking
-                    await MainActor.run {
-                        self.chatThinkingText = thinkingAccumulated
-                    }
-                }
-                
-                let delta = chunk.message?.content ?? ""
-                if !delta.isEmpty {
-                    finalResponse += delta
-                    await MainActor.run {
-                        self.updateChatMessageText(id: assistantMessageID, text: finalResponse)
-                        if self.chatActivityStatus != nil {
-                            self.chatActivityStatus = nil
-                        }
-                    }
-                }
-            }
-            
-            await MainActor.run {
-                self.finishChatReply()
-            }
-            
-        } catch {
-            await MainActor.run {
-                self.handleChatReplyError(for: assistantMessageID, error: error)
-            }
-        }
-    }
-    
-    /// Check if accumulated text looks like a JSON tool call
-    private func looksLikeToolCall(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.hasPrefix("{") && trimmed.contains("\"tool_call\"")
-    }
-}
-
 // MARK: - Updated requestMessagesForCurrentChat with Tool Support
 
 extension BoardStore {
@@ -5316,5 +5172,282 @@ extension BoardStore {
                 files: fileData.isEmpty ? nil : fileData
             )
         }
+    }
+}
+
+extension BoardStore {
+    
+    // MARK: - Modified Chat Reply with Async Tool Support
+    
+    /// Process chat replies with support for asynchronous tool execution
+    private func processChatReply() {
+        chatReplyTask?.cancel()
+        
+        chatReplyTask = Task { @MainActor in
+            guard !doc.chat.messages.isEmpty else {
+                finishChatReply()
+                return
+            }
+            
+            let lastMessage = doc.chat.messages[doc.chat.messages.count - 1]
+            guard lastMessage.role == .user else {
+                finishChatReply()
+                return
+            }
+            
+            // CORRECTED: Create assistant message placeholder directly
+            let assistantMessageID = UUID()
+            let now = Date().timeIntervalSince1970
+            let assistantMessage = ChatMsg(
+                id: assistantMessageID,
+                role: .assistant,
+                text: "",
+                images: [],
+                files: [],
+                ts: now
+            )
+            doc.chat.messages.append(assistantMessage)
+            touch()
+            
+            let requestMessages = requestMessagesForCurrentChatWithTools()
+            
+            var accumulated = ""
+            var thinkingAccumulated = ""
+            var detectedToolCall: ToolCall?
+            
+            do {
+                try await self.chatService.stream(
+                    model: self.chatModelName,
+                    messages: requestMessages,
+                    includeSystemPrompt: true
+                ) { chunk in
+                    if let thinking = chunk.message?.thinking ?? chunk.thinking {
+                        thinkingAccumulated += thinking
+                        await MainActor.run {
+                            self.chatThinkingText = thinkingAccumulated
+                        }
+                    }
+                    
+                    if detectedToolCall == nil, let toolCall = chunk.toolCall {
+                        detectedToolCall = toolCall
+                        print("DEBUG: Structured tool call detected: \(toolCall.name)")
+                    }
+                    
+                    // Check for tool call in the streamed content (JSON format)
+                    if detectedToolCall == nil {
+                        if let toolCall = self.extractToolCall(from: accumulated) {
+                            detectedToolCall = toolCall
+                            print("DEBUG: JSON tool call detected: \(toolCall.name)")
+                        }
+                    }
+                    
+                    let delta = chunk.message?.content ?? ""
+                    if !delta.isEmpty {
+                        accumulated += delta
+                        
+                        // Check again after adding delta
+                        if detectedToolCall == nil {
+                            if let toolCall = self.extractToolCall(from: accumulated) {
+                                detectedToolCall = toolCall
+                            }
+                        }
+                        
+                        // Don't display raw JSON tool calls to user
+                        if !self.looksLikeToolCall(accumulated) {
+                            await MainActor.run {
+                                self.updateChatMessageText(id: assistantMessageID, text: accumulated)
+                                if self.chatActivityStatus != nil {
+                                    self.chatActivityStatus = nil
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // If a tool was called, execute it asynchronously
+                if let toolCall = detectedToolCall {
+                    await self.handleAsyncToolCall(
+                        toolCall: toolCall,
+                        assistantMessageID: assistantMessageID,
+                        previousMessages: requestMessages
+                    )
+                } else {
+                    await MainActor.run {
+                        self.finishChatReply()
+                    }
+                }
+                
+            } catch {
+                if error is CancellationError {
+                    await MainActor.run {
+                        self.finishChatReply(canceled: true)
+                    }
+                } else {
+                    await MainActor.run {
+                        self.handleChatReplyError(for: assistantMessageID, error: error)
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Async Tool Call Handler
+    
+    /// Handle tool execution asynchronously with immediate user feedback
+    private func handleAsyncToolCall(
+        toolCall: ToolCall,
+        assistantMessageID: UUID,
+        previousMessages: [OllamaChatService.Message]
+    ) async {
+        // Extract the acknowledgment message from tool arguments
+        let acknowledgment = toolCall.arguments["acknowledgment"] ?? "Let me look that up for you"
+        
+        // Immediately show the acknowledgment to the user
+        await MainActor.run {
+            self.updateChatMessageText(id: assistantMessageID, text: acknowledgment)
+            self.chatActivityStatus = "Searching..."
+        }
+        
+        // Kick off the search in the background
+        Task {
+            let toolResult = await ToolExecutor.execute(toolCall)
+            
+            // Once search completes, continue the conversation with results
+            await self.processToolResults(
+                toolResult: toolResult,
+                toolCall: toolCall,
+                assistantMessageID: assistantMessageID,
+                previousMessages: previousMessages,
+                acknowledgmentText: acknowledgment
+            )
+        }
+    }
+    
+    // MARK: - Process Tool Results
+    
+    /// Process the results from an async tool execution
+    private func processToolResults(
+        toolResult: ToolResponse,
+        toolCall: ToolCall,
+        assistantMessageID: UUID,
+        previousMessages: [OllamaChatService.Message],
+        acknowledgmentText: String
+    ) async {
+        // If tool execution failed, inform the user
+        if !toolResult.success {
+            let errorMessage: String
+            if let error = toolResult.error, error.contains("No internet connection") {
+                errorMessage = acknowledgmentText + "\n\nI'm sorry, but I cannot perform a search right now because there's no internet connection available."
+            } else {
+                errorMessage = acknowledgmentText + "\n\nI encountered an error while searching: \(toolResult.error ?? "Unknown error")"
+            }
+            
+            await MainActor.run {
+                self.updateChatMessageText(id: assistantMessageID, text: errorMessage)
+                self.chatActivityStatus = nil
+                self.finishChatReply()
+            }
+            return
+        }
+        
+        // Build messages including tool result
+        await MainActor.run {
+            self.chatActivityStatus = "Processing results..."
+        }
+        
+        var messagesWithToolResult = previousMessages
+        
+        // Add a system message with the tool result and context
+        let contextMessage = """
+        SEARCH RESULTS CONTEXT:
+        You previously told the user: "\(acknowledgmentText)"
+
+        The user is now waiting for you to continue from that message with the search results.
+        Do NOT repeat yourself or start fresh - just continue naturally with the information.
+
+        Search results are below:
+        """
+
+        messagesWithToolResult.append(
+            OllamaChatService.Message(
+                role: "system",
+                content: contextMessage,
+                toolResults: [toolResult]
+            )
+        )
+        
+        // Stream the model's response to the tool result
+        // This will append to the acknowledgment message
+        var finalResponse = acknowledgmentText + "\n\n"
+        var thinkingAccumulated = ""
+        
+        do {
+            try await self.chatService.stream(
+                model: self.chatModelName,
+                messages: messagesWithToolResult,
+                includeSystemPrompt: false
+            ) { chunk in
+                if let thinking = chunk.message?.thinking ?? chunk.thinking {
+                    thinkingAccumulated += thinking
+                    await MainActor.run {
+                        self.chatThinkingText = thinkingAccumulated
+                    }
+                }
+                
+                let delta = chunk.message?.content ?? ""
+                if !delta.isEmpty {
+                    finalResponse += delta
+                    await MainActor.run {
+                        self.updateChatMessageText(id: assistantMessageID, text: finalResponse)
+                        if self.chatActivityStatus != nil {
+                            self.chatActivityStatus = nil
+                        }
+                    }
+                }
+            }
+            
+            await MainActor.run {
+                self.finishChatReply()
+            }
+            
+        } catch {
+            await MainActor.run {
+                self.handleChatReplyError(for: assistantMessageID, error: error)
+            }
+        }
+    }
+    
+    // MARK: - Helper Methods
+    
+    /// Extract tool call from accumulated text
+    private func extractToolCall(from text: String) -> ToolCall? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") && trimmed.contains("\"tool_call\"") else {
+            return nil
+        }
+        
+        // Try to parse as JSON
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let toolCallDict = json["tool_call"] as? [String: Any],
+              let id = toolCallDict["id"] as? String,
+              let name = toolCallDict["name"] as? String,
+              let argumentsDict = toolCallDict["arguments"] as? [String: Any] else {
+            return nil
+        }
+        
+        // Convert arguments to [String: String]
+        var arguments: [String: String] = [:]
+        for (key, value) in argumentsDict {
+            arguments[key] = String(describing: value)
+        }
+        
+        return ToolCall(id: id, name: name, arguments: arguments)
+    }
+    
+    /// Check if accumulated text looks like a JSON tool call
+    private func looksLikeToolCall(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.hasPrefix("{") && trimmed.contains("\"tool_call\"")
     }
 }
