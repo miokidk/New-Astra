@@ -4,6 +4,15 @@ import Foundation
 
 class OllamaChatService {
     
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = false
+        config.httpMaximumConnectionsPerHost = 1
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 300
+        return URLSession(configuration: config)
+    }()
+    
     // MARK: - Message Structure
     
     struct Message {
@@ -162,17 +171,28 @@ class OllamaChatService {
         model: String,
         messages: [Message],
         includeSystemPrompt: Bool = true,
+        includeTools: Bool = true,
         onChunk: @escaping (Chunk) async -> Void
     ) async throws {
+        
+        let t0 = CFAbsoluteTimeGetCurrent()
+        func log(_ s: String) {
+            print("TTFR(OllamaChatService) \(s) +\(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t0))s")
+        }
+        log("stream() entered; messages=\(messages.count); includeSystemPrompt=\(includeSystemPrompt); includeTools=\(includeTools)")
         
         // Build API request
         var apiMessages: [[String: Any]] = []
         
         // Add system prompt with tool definitions if requested
         if includeSystemPrompt {
+            let t_sys = CFAbsoluteTimeGetCurrent()
+            let sys = ToolRegistry.systemPrompt()
+            log("systemPrompt() built in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t_sys))s; chars=\(sys.count)")
+
             apiMessages.append([
                 "role": "system",
-                "content": ToolRegistry.systemPrompt()
+                "content": sys
             ])
         }
         
@@ -276,17 +296,22 @@ class OllamaChatService {
         
         let ollamaTools = ToolRegistry.availableTools.map { $0.asOllamaToolDict() }
 
-        let requestBody: [String: Any] = [
+        var requestBody: [String: Any] = [
             "model": model,
             "messages": apiMessages,
-            "tools": ollamaTools,
-            "stream": true
+            "stream": true,
+            "keep_alive": "30m"
         ]
+
+        // Only include tools if enabled and available
+        if includeTools, !ollamaTools.isEmpty {
+            requestBody["tools"] = ollamaTools
+        }
         
         print("DEBUG: Sending request to Ollama with \(apiMessages.count) messages")
         
         // Make the API request
-        guard let url = URL(string: "http://localhost:11434/api/chat") else {
+        guard let url = URL(string: "http://127.0.0.1:11434/api/chat") else {
             throw NSError(domain: "OllamaChatService", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "Invalid API URL"
             ])
@@ -296,8 +321,16 @@ class OllamaChatService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-        
-        let (asyncBytes, response) = try await URLSession.shared.bytes(for: request)
+
+        let bodySize = request.httpBody?.count ?? 0
+        log("HTTP request ready; url=\(request.url?.absoluteString ?? "nil"); bodyBytes=\(bodySize)")
+
+        let t_send = CFAbsoluteTimeGetCurrent()
+        log("bytes(for:) starting...")
+
+        let (asyncBytes, response) = try await Self.session.bytes(for: request)
+
+        log("bytes(for:) returned (headers received) in \(String(format: "%.3f", CFAbsoluteTimeGetCurrent() - t_send))s")
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw NSError(domain: "OllamaChatService", code: -1, userInfo: [
@@ -318,6 +351,7 @@ class OllamaChatService {
         for try await line in asyncBytes.lines {
             guard !line.isEmpty else { continue }
             guard let data = line.data(using: .utf8) else { continue }
+            var didLogFirstLine = false
             
             do {
                 let chunk = try JSONDecoder().decode(Chunk.self, from: data)

@@ -195,6 +195,7 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     @Published var chatDraftImages: [ImageRef] = []
     @Published var chatDraftFiles: [FileRef] = []
     @Published var pendingChatReplies: Int = 0
+    private var queuedUserMessageIDs: [UUID] = []
     @Published private(set) var chatActivityStatus: String?
     @Published private(set) var chatThinkingText: String?
     @Published var chatThinkingExpanded: Bool = false
@@ -3181,6 +3182,7 @@ extension BoardStore {
         doc.pendingClarification = nil
         chatNeedsAttention = false
         pendingChatReplies = 0
+        queuedUserMessageIDs.removeAll()
         touch()
     }
 
@@ -3189,6 +3191,7 @@ extension BoardStore {
         chatReplyTask?.cancel()
         chatReplyTask = nil
         pendingChatReplies = 0
+        queuedUserMessageIDs.removeAll()
         chatActivityStatus = nil
         chatWarning = nil
     }
@@ -3231,11 +3234,6 @@ extension BoardStore {
             return false
         }
 
-        if pendingChatReplies > 0 {
-            chatWarning = "Please stop the current response before sending another message."
-            return false
-        }
-
         chatWarning = nil
         chatThinkingText = nil
         chatThinkingExpanded = false
@@ -3254,19 +3252,40 @@ extension BoardStore {
         
         doc.chat.messages.append(userMessage)
         touch()
-        pendingChatReplies = 1
+        queuedUserMessageIDs.append(userMessage.id)
 
         if !doc.ui.panels.chat.isOpen {
             chatNeedsAttention = true
         }
 
-        processChatReply()
+        startChatReplyIfIdle()
 
         if voiceInput {
             endVoiceConversation()
         }
         
         return true
+    }
+
+    @MainActor
+    private func startChatReplyIfIdle() {
+        guard pendingChatReplies == 0 else { return }
+
+        while !queuedUserMessageIDs.isEmpty {
+            let nextMessageID = queuedUserMessageIDs.removeFirst()
+
+            guard let messageIndex = doc.chat.messages.firstIndex(where: { $0.id == nextMessageID }) else {
+                continue
+            }
+
+            guard doc.chat.messages[messageIndex].role == .user else {
+                continue
+            }
+
+            pendingChatReplies = 1
+            processChatReply(forUserMessageID: nextMessageID)
+            return
+        }
     }
 
     private func requestMessagesForCurrentChat() -> [OllamaChatService.Message] {
@@ -3441,6 +3460,7 @@ extension BoardStore {
             chatWarning = nil
         }
         chatReplyTask = nil
+        startChatReplyIfIdle()
     }
 
     @MainActor
@@ -3458,6 +3478,7 @@ extension BoardStore {
         chatWarning = "Chat error: \(message)"
         updateChatMessageText(id: assistantMessageID, text: "Error: \(message)")
         chatReplyTask = nil
+        startChatReplyIfIdle()
     }
 
     @MainActor
@@ -5103,75 +5124,114 @@ extension BoardStore {
 
 extension BoardStore {
     
-    /// Enhanced version that includes tool information
-    private func requestMessagesForCurrentChatWithTools() -> [OllamaChatService.Message] {
-        guard doc.chat.messages.count > 1 else { return [] }
-        
-        return doc.chat.messages.dropLast().compactMap { message in
-            // Convert images to base64
-            var imageData: [[String: String]] = []
+    private func requestMessagesForCurrentChatWithTools(upTo messageIndex: Int) async -> [OllamaChatService.Message] {
+        guard messageIndex > 0,
+              doc.chat.messages.indices.contains(messageIndex - 1) else { return [] }
+
+        // Only include the most recent message; Ollama keeps earlier turns in its own context.
+
+        // 1) Snapshot (FAST, on MainActor): resolve URLs + mime types
+        struct Snapshot: Sendable {
+            struct ImageItem: Sendable { let url: URL; let mimeType: String }
+            struct FileItem: Sendable { let url: URL; let filename: String; let mimeType: String }
+
+            let role: String
+            let content: String
+            let images: [ImageItem]
+            let files: [FileItem]
+        }
+
+        func mimeType(for ext: String, default fallback: String) -> String {
+            switch ext.lowercased() {
+            case "png": return "image/png"
+            case "jpg", "jpeg": return "image/jpeg"
+            case "gif": return "image/gif"
+            case "webp": return "image/webp"
+            case "heic": return "image/heic"
+            case "pdf": return "application/pdf"
+            case "txt": return "text/plain"
+            case "swift": return "text/x-swift"
+            case "py": return "text/x-python"
+            case "js": return "text/javascript"
+            case "json": return "application/json"
+            case "xml": return "application/xml"
+            case "html": return "text/html"
+            case "css": return "text/css"
+            case "csv": return "text/csv"
+            case "md": return "text/markdown"
+            case "doc", "docx": return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            case "xls", "xlsx": return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            default: return fallback
+            }
+        }
+
+        let snapshots: [Snapshot] = [doc.chat.messages[messageIndex - 1]].compactMap { message in
+            var images: [Snapshot.ImageItem] = []
+            images.reserveCapacity(message.images.count)
+
             for imageRef in message.images {
-                if let url = imageURL(for: imageRef),
-                   let data = try? Data(contentsOf: url) {
-                    let base64 = data.base64EncodedString()
-                    let ext = url.pathExtension.lowercased()
-                    let mimeType: String
-                    switch ext {
-                    case "png": mimeType = "image/png"
-                    case "jpg", "jpeg": mimeType = "image/jpeg"
-                    case "gif": mimeType = "image/gif"
-                    case "webp": mimeType = "image/webp"
-                    case "heic": mimeType = "image/heic"
-                    default: mimeType = "image/png"
-                    }
-                    imageData.append([
-                        "type": "image",
-                        "data": base64,
-                        "mimeType": mimeType
-                    ])
-                }
+                guard let url = imageURL(for: imageRef) else { continue }
+                let ext = url.pathExtension
+                let mt = mimeType(for: ext, default: "image/png")
+                images.append(.init(url: url, mimeType: mt))
             }
-            
-            // Convert files to base64
-            var fileData: [[String: String]] = []
+
+            var files: [Snapshot.FileItem] = []
+            files.reserveCapacity(message.files.count)
+
             for fileRef in message.files {
-                if let url = fileURL(for: fileRef),
-                   let data = try? Data(contentsOf: url) {
-                    let base64 = data.base64EncodedString()
-                    let ext = url.pathExtension.lowercased()
-                    let mimeType: String
-                    switch ext {
-                    case "pdf": mimeType = "application/pdf"
-                    case "txt": mimeType = "text/plain"
-                    case "swift": mimeType = "text/x-swift"
-                    case "py": mimeType = "text/x-python"
-                    case "js": mimeType = "text/javascript"
-                    case "json": mimeType = "application/json"
-                    case "xml": mimeType = "application/xml"
-                    case "html": mimeType = "text/html"
-                    case "css": mimeType = "text/css"
-                    case "csv": mimeType = "text/csv"
-                    case "md": mimeType = "text/markdown"
-                    case "doc", "docx": mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                    case "xls", "xlsx": mimeType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    default: mimeType = "application/octet-stream"
-                    }
-                    fileData.append([
-                        "type": "file",
-                        "data": base64,
-                        "mimeType": mimeType,
-                        "filename": fileRef.displayName
-                    ])
-                }
+                guard let url = fileURL(for: fileRef) else { continue }
+                let ext = url.pathExtension
+                let mt = mimeType(for: ext, default: "application/octet-stream")
+                files.append(.init(url: url, filename: fileRef.displayName, mimeType: mt))
             }
-            
-            return OllamaChatService.Message(
+
+            return Snapshot(
                 role: message.role.rawValue,
                 content: message.text,
-                images: imageData.isEmpty ? nil : imageData,
-                files: fileData.isEmpty ? nil : fileData
+                images: images,
+                files: files
             )
         }
+
+        // 2) Heavy work OFF MainActor: Data(contentsOf:) + base64
+        return await Task.detached(priority: .userInitiated) {
+            return snapshots.map { snap in
+                var imageData: [[String: String]] = []
+                imageData.reserveCapacity(snap.images.count)
+
+                for img in snap.images {
+                    if let data = try? Data(contentsOf: img.url) {
+                        imageData.append([
+                            "type": "image",
+                            "data": data.base64EncodedString(),
+                            "mimeType": img.mimeType
+                        ])
+                    }
+                }
+
+                var fileData: [[String: String]] = []
+                fileData.reserveCapacity(snap.files.count)
+
+                for f in snap.files {
+                    if let data = try? Data(contentsOf: f.url) {
+                        fileData.append([
+                            "type": "file",
+                            "data": data.base64EncodedString(),
+                            "mimeType": f.mimeType,
+                            "filename": f.filename
+                        ])
+                    }
+                }
+
+                return OllamaChatService.Message(
+                    role: snap.role,
+                    content: snap.content,
+                    images: imageData.isEmpty ? nil : imageData,
+                    files: fileData.isEmpty ? nil : fileData
+                )
+            }
+        }.value
     }
 }
 
@@ -5180,47 +5240,70 @@ extension BoardStore {
     // MARK: - Modified Chat Reply with Async Tool Support
     
     /// Process chat replies with support for asynchronous tool execution
-    private func processChatReply() {
+    private func processChatReply(forUserMessageID userMessageID: UUID) {
         chatReplyTask?.cancel()
-        
+
         chatReplyTask = Task { @MainActor in
-            guard !doc.chat.messages.isEmpty else {
+            let t_chatStart = CFAbsoluteTimeGetCurrent()
+            print("TTFR(BoardStore) start processChatReply t=0")
+
+            guard let userIndex = doc.chat.messages.firstIndex(where: { $0.id == userMessageID }) else {
                 finishChatReply()
                 return
             }
-            
-            let lastMessage = doc.chat.messages[doc.chat.messages.count - 1]
-            guard lastMessage.role == .user else {
+            guard doc.chat.messages[userIndex].role == .user else {
                 finishChatReply()
                 return
             }
-            
-            // CORRECTED: Create assistant message placeholder directly
-            let assistantMessageID = UUID()
-            let now = Date().timeIntervalSince1970
-            let assistantMessage = ChatMsg(
-                id: assistantMessageID,
-                role: .assistant,
-                text: "",
-                images: [],
-                files: [],
-                ts: now
-            )
-            doc.chat.messages.append(assistantMessage)
-            touch()
-            
-            let requestMessages = requestMessagesForCurrentChatWithTools()
+
+            let assistantMessageID: UUID
+            let assistantMessageIndex: Int
+            var didInsertAssistantMessage = false
+
+            if userIndex + 1 < doc.chat.messages.count,
+               doc.chat.messages[userIndex + 1].role == .assistant {
+                assistantMessageIndex = userIndex + 1
+                assistantMessageID = doc.chat.messages[assistantMessageIndex].id
+            } else {
+                assistantMessageID = UUID()
+                let now = Date().timeIntervalSince1970
+                let assistantMessage = ChatMsg(
+                    id: assistantMessageID,
+                    role: .assistant,
+                    text: "",
+                    images: [],
+                    files: [],
+                    ts: now
+                )
+                assistantMessageIndex = userIndex + 1
+                doc.chat.messages.insert(assistantMessage, at: assistantMessageIndex)
+                didInsertAssistantMessage = true
+            }
+            if didInsertAssistantMessage {
+                touch()
+            }
+
+            let t_buildStart = CFAbsoluteTimeGetCurrent()
+            print("TTFR(BoardStore) building request messages...")
+
+            let requestMessages = await requestMessagesForCurrentChatWithTools(upTo: assistantMessageIndex)
             
             var accumulated = ""
             var thinkingAccumulated = ""
             var detectedToolCall: ToolCall?
-            
+
+            let t_streamCall = CFAbsoluteTimeGetCurrent()
+            var didLogFirstChunk = false
+
             do {
                 try await self.chatService.stream(
                     model: self.chatModelName,
                     messages: requestMessages,
                     includeSystemPrompt: true
                 ) { chunk in
+                    if !didLogFirstChunk {
+                        didLogFirstChunk = true
+                    }
                     if let thinking = chunk.message?.thinking ?? chunk.thinking {
                         thinkingAccumulated += thinking
                         await MainActor.run {
@@ -5333,59 +5416,68 @@ extension BoardStore {
         previousMessages: [OllamaChatService.Message],
         acknowledgmentText: String
     ) async {
-        // If tool execution failed, inform the user
-        if !toolResult.success {
+        func finishWithFailure(_ message: String) async {
+            await MainActor.run {
+                self.updateChatMessageText(id: assistantMessageID, text: message)
+                self.chatActivityStatus = nil
+                self.finishChatReply()
+            }
+        }
+
+        guard toolResult.success else {
             let errorMessage: String
             if let error = toolResult.error, error.contains("No internet connection") {
                 errorMessage = acknowledgmentText + "\n\nI'm sorry, but I cannot perform a search right now because there's no internet connection available."
             } else {
                 errorMessage = acknowledgmentText + "\n\nI encountered an error while searching: \(toolResult.error ?? "Unknown error")"
             }
-            
-            await MainActor.run {
-                self.updateChatMessageText(id: assistantMessageID, text: errorMessage)
-                self.chatActivityStatus = nil
-                self.finishChatReply()
-            }
+            await finishWithFailure(errorMessage)
             return
         }
-        
-        // Build messages including tool result
+
         await MainActor.run {
             self.chatActivityStatus = "Processing results..."
         }
-        
-        var messagesWithToolResult = previousMessages
-        
-        // Add a system message with the tool result and context
-        let contextMessage = """
-        SEARCH RESULTS CONTEXT:
-        You previously told the user: "\(acknowledgmentText)"
 
-        The user is now waiting for you to continue from that message with the search results.
-        Do NOT repeat yourself or start fresh - just continue naturally with the information.
-
-        Search results are below:
-        """
-
-        messagesWithToolResult.append(
+        var conversation = previousMessages
+        if !acknowledgmentText.isEmpty {
+            conversation.append(
+                OllamaChatService.Message(
+                    role: "assistant",
+                    content: acknowledgmentText
+                )
+            )
+        }
+        conversation.append(
             OllamaChatService.Message(
                 role: "system",
-                content: contextMessage,
+                content: makeToolContextMessage(acknowledgment: acknowledgmentText, toolCall: toolCall),
                 toolResults: [toolResult]
             )
         )
-        
-        // Stream the model's response to the tool result
-        // This will append to the acknowledgment message
+
         var finalResponse = acknowledgmentText + "\n\n"
         var thinkingAccumulated = ""
-        
-        do {
+
+        func runAnswerPass(extraSystemMessage: String?) async throws -> Bool {
+            if let extraSystemMessage {
+                conversation.append(
+                    OllamaChatService.Message(
+                        role: "system",
+                        content: extraSystemMessage
+                    )
+                )
+            }
+
+            var detectedToolCall = false
+            var detectionBuffer = ""
+            var passDelta = ""
+
             try await self.chatService.stream(
                 model: self.chatModelName,
-                messages: messagesWithToolResult,
-                includeSystemPrompt: false
+                messages: conversation,
+                includeSystemPrompt: false,
+                includeTools: false
             ) { chunk in
                 if let thinking = chunk.message?.thinking ?? chunk.thinking {
                     thinkingAccumulated += thinking
@@ -5393,23 +5485,59 @@ extension BoardStore {
                         self.chatThinkingText = thinkingAccumulated
                     }
                 }
-                
+
+                if chunk.toolCall != nil {
+                    detectedToolCall = true
+                }
+
                 let delta = chunk.message?.content ?? ""
                 if !delta.isEmpty {
-                    finalResponse += delta
-                    await MainActor.run {
-                        self.updateChatMessageText(id: assistantMessageID, text: finalResponse)
-                        if self.chatActivityStatus != nil {
-                            self.chatActivityStatus = nil
+                    detectionBuffer += delta
+                    if detectionBuffer.count > 4096 {
+                        detectionBuffer = String(detectionBuffer.suffix(4096))
+                    }
+
+                    if !detectedToolCall,
+                       let _ = self.extractToolCall(from: detectionBuffer) {
+                        detectedToolCall = true
+                    }
+
+                    if !self.looksLikeToolCall(detectionBuffer) {
+                        passDelta += delta
+                        finalResponse += delta
+                        await MainActor.run {
+                            self.updateChatMessageText(id: assistantMessageID, text: finalResponse)
+                            if self.chatActivityStatus != nil {
+                                self.chatActivityStatus = nil
+                            }
                         }
                     }
                 }
             }
-            
+
+            if !passDelta.isEmpty {
+                conversation.append(
+                    OllamaChatService.Message(
+                        role: "assistant",
+                        content: passDelta
+                    )
+                )
+            }
+
+            return detectedToolCall && passDelta.isEmpty
+        }
+
+        do {
+            let needsRetry = try await runAnswerPass(extraSystemMessage: nil)
+            if needsRetry {
+                _ = try await runAnswerPass(
+                    extraSystemMessage: "Tool calls are disabled for this response. Answer directly using the provided search results."
+                )
+            }
+
             await MainActor.run {
                 self.finishChatReply()
             }
-            
         } catch {
             await MainActor.run {
                 self.handleChatReplyError(for: assistantMessageID, error: error)
@@ -5449,5 +5577,19 @@ extension BoardStore {
     private func looksLikeToolCall(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("{") && trimmed.contains("\"tool_call\"")
+    }
+
+    /// Builds a contextual system prompt for the model based on the tool call
+    private func makeToolContextMessage(acknowledgment: String, toolCall: ToolCall) -> String {
+        """
+        SEARCH RESULTS CONTEXT:
+        You previously told the user: "\(acknowledgment)"
+
+        Tool "\(toolCall.name)" (id: \(toolCall.id)) returned the search results below.
+        Continue naturally from your prior reply using the information provided.
+        Do NOT repeat yourself or restart the conversation.
+
+        Search results are below:
+        """
     }
 }

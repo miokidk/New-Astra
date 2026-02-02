@@ -638,29 +638,6 @@ private struct HUDIconButton: View {
     }
 }
 
-private final class ScrollCaptureView: NSView {
-    var onScroll: ((CGFloat, CGFloat) -> Void)?
-
-    override func scrollWheel(with event: NSEvent) {
-        onScroll?(event.scrollingDeltaX, event.scrollingDeltaY)
-        nextResponder?.scrollWheel(with: event)
-    }
-}
-
-private struct HUDScrollCapture: NSViewRepresentable {
-    var onScroll: (CGFloat, CGFloat) -> Void
-
-    func makeNSView(context: Context) -> ScrollCaptureView {
-        let view = ScrollCaptureView()
-        view.onScroll = onScroll
-        return view
-    }
-
-    func updateNSView(_ nsView: ScrollCaptureView, context: Context) {
-        nsView.onScroll = onScroll
-    }
-}
-
 struct FloatingPanelHostView: View {
     @EnvironmentObject var store: BoardStore
     @Binding var chatInput: String
@@ -851,14 +828,110 @@ private enum ChatScrollAnchor {
     static let bottom = "CHAT_BOTTOM_ANCHOR"
 }
 
-private struct ChatViewportHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+private final class ChatScrollState {
+    var isPinnedToBottom: Bool = true
+    var autoScrollWorkItem: DispatchWorkItem?
+    weak var scrollView: NSScrollView?
+    var lastContentHeight: CGFloat = 0
 }
 
-private struct ChatBottomMaxYKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+private struct ChatScrollObserver: NSViewRepresentable {
+    var onScroll: (NSScrollView) -> Void
+    var onContentSizeChange: (NSScrollView) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onScroll: onScroll, onContentSizeChange: onContentSizeChange)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onScroll = onScroll
+        context.coordinator.onContentSizeChange = onContentSizeChange
+        context.coordinator.attach(to: nsView)
+    }
+
+    final class Coordinator: NSObject {
+        var onScroll: (NSScrollView) -> Void
+        var onContentSizeChange: (NSScrollView) -> Void
+        private weak var scrollView: NSScrollView?
+        private var boundsObserver: NSObjectProtocol?
+        private var frameObserver: NSObjectProtocol?
+        private var pendingAttach = false
+
+        init(onScroll: @escaping (NSScrollView) -> Void,
+             onContentSizeChange: @escaping (NSScrollView) -> Void) {
+            self.onScroll = onScroll
+            self.onContentSizeChange = onContentSizeChange
+        }
+
+        func attach(to view: NSView) {
+            guard scrollView == nil else { return }
+            if let sv = findEnclosingScrollView(from: view) {
+                attach(scrollView: sv)
+            } else if !pendingAttach {
+                pendingAttach = true
+                DispatchQueue.main.async { [weak self, weak view] in
+                    guard let self, let view else { return }
+                    self.pendingAttach = false
+                    self.attach(to: view)
+                }
+            }
+        }
+
+        private func findEnclosingScrollView(from view: NSView) -> NSScrollView? {
+            var current: NSView? = view
+            while let node = current {
+                if let sv = node as? NSScrollView {
+                    return sv
+                }
+                if let sv = node.enclosingScrollView {
+                    return sv
+                }
+                current = node.superview
+            }
+            return nil
+        }
+
+        private func attach(scrollView: NSScrollView) {
+            self.scrollView = scrollView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self, let sv = self.scrollView else { return }
+                self.onScroll(sv)
+            }
+            if let docView = scrollView.documentView {
+                docView.postsFrameChangedNotifications = true
+                frameObserver = NotificationCenter.default.addObserver(
+                    forName: NSView.frameDidChangeNotification,
+                    object: docView,
+                    queue: .main
+                ) { [weak self] _ in
+                    guard let self, let sv = self.scrollView else { return }
+                    self.onContentSizeChange(sv)
+                }
+            }
+            onScroll(scrollView)
+        }
+
+        deinit {
+            if let boundsObserver {
+                NotificationCenter.default.removeObserver(boundsObserver)
+            }
+            if let frameObserver {
+                NotificationCenter.default.removeObserver(frameObserver)
+            }
+        }
+    }
 }
 
 struct ChatPanelView: View {
@@ -866,10 +939,7 @@ struct ChatPanelView: View {
     @Binding var chatInput: String
     var onSend: (Bool) -> Void
 
-    @State private var isPinnedToBottom: Bool = true
-    @State private var viewportHeight: CGFloat = 0
-    @State private var bottomMaxY: CGFloat = 0
-
+    @State private var scrollState = ChatScrollState()
     @FocusState private var panelFocused: Bool
 
     @State private var isFindVisible: Bool = false
@@ -877,14 +947,9 @@ struct ChatPanelView: View {
     @State private var findMatches: [UUID] = []
     @State private var findIndex: Int = 0
     @State private var pendingFindCommand: FindCommand?
-    
-    @State private var autoScrollWorkItem: DispatchWorkItem?
-    @State private var lastStreamScrollAt: CFTimeInterval = 0
-    @State private var allowPinnedRecompute: Bool = false
-    @State private var scrollInteractionReset: DispatchWorkItem?
 
     private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        autoScrollWorkItem?.cancel()
+        scrollState.autoScrollWorkItem?.cancel()
 
         let item = DispatchWorkItem {
             if animated {
@@ -900,23 +965,11 @@ struct ChatPanelView: View {
             }
         }
 
-        autoScrollWorkItem = item
+        scrollState.autoScrollWorkItem = item
         // small delay = lets layout settle + coalesces rapid token updates
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
     }
     
-    private func noteUserScrollInteraction() {
-        allowPinnedRecompute = true
-        scrollInteractionReset?.cancel()
-
-        let item = DispatchWorkItem {
-            allowPinnedRecompute = false
-        }
-        scrollInteractionReset = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
-    }
-
-
     private enum FindCommand: Equatable {
         case open
         case next
@@ -928,20 +981,69 @@ struct ChatPanelView: View {
     // but keep 1pt to avoid float jitter.
     private let pinThreshold: CGFloat = 12
 
-    private func recomputePinnedState() {
-        // While streaming, geometry can jitter as text grows; only recompute pin state
-        // if the user is actively scrolling (we detect via HUDScrollCapture).
-        if store.pendingChatReplies > 0 && !allowPinnedRecompute {
+    private func updatePinnedState(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        scrollState.scrollView = scrollView
+        if scrollState.lastContentHeight <= 0 {
+            scrollState.lastContentHeight = docView.bounds.height
+        }
+        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
+        let currentOffset = scrollView.contentView.bounds.origin.y
+        let distanceFromBottom: CGFloat
+        if docView.isFlipped {
+            distanceFromBottom = max(0, maxOffset - currentOffset)
+        } else {
+            distanceFromBottom = max(0, currentOffset)
+        }
+        let pinnedNow = distanceFromBottom <= pinThreshold
+        if pinnedNow != scrollState.isPinnedToBottom {
+            scrollState.isPinnedToBottom = pinnedNow
+            if !pinnedNow {
+                scrollState.autoScrollWorkItem?.cancel()
+            }
+        }
+    }
+
+    private func scrollToBottom(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
+        let targetOffset = docView.isFlipped ? maxOffset : 0
+        let currentOffset = scrollView.contentView.bounds.origin.y
+        if abs(currentOffset - targetOffset) > 0.5 {
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+    }
+
+    private func handleContentSizeChange(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        scrollState.scrollView = scrollView
+        let newHeight = docView.bounds.height
+        let oldHeight = scrollState.lastContentHeight
+        scrollState.lastContentHeight = newHeight
+
+        guard scrollState.isPinnedToBottom else { return }
+        guard oldHeight > 0 else {
+            scrollToBottom(using: scrollView)
             return
         }
 
-        guard viewportHeight > 0 else { return }
-        let distanceFromBottom = bottomMaxY - viewportHeight
-        let pinnedNow = distanceFromBottom <= pinThreshold
-        if pinnedNow != isPinnedToBottom {
-            isPinnedToBottom = pinnedNow
+        if docView.isFlipped {
+            let delta = newHeight - oldHeight
+            if abs(delta) > 0.5 {
+                let maxOffset = max(0, newHeight - scrollView.contentView.bounds.height)
+                let currentOffset = scrollView.contentView.bounds.origin.y
+                let targetOffset = min(max(0, currentOffset + delta), maxOffset)
+                if abs(currentOffset - targetOffset) > 0.5 {
+                    scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetOffset))
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+                }
+            }
+        } else {
+            scrollToBottom(using: scrollView)
         }
     }
+
     
     private func rebuildFindMatches() {
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1004,7 +1106,6 @@ struct ChatPanelView: View {
     }
 
     var body: some View {
-        let lastMessageText = store.doc.chat.messages.last?.text ?? ""
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let matchSummary: String = {
             if q.isEmpty { return "Type to search" }
@@ -1091,53 +1192,22 @@ struct ChatPanelView: View {
                             Color.clear
                                 .frame(height: 1)
                                 .id(ChatScrollAnchor.bottom)
-                                .background(
-                                    GeometryReader { geo in
-                                        Color.clear.preference(
-                                            key: ChatBottomMaxYKey.self,
-                                            value: geo.frame(in: .named("chatScroll")).maxY
-                                        )
-                                    }
-                                )
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.vertical, 4)
+                        .background(
+                            ChatScrollObserver(
+                                onScroll: { scrollView in
+                                    updatePinnedState(using: scrollView)
+                                },
+                                onContentSizeChange: { scrollView in
+                                    handleContentSizeChange(using: scrollView)
+                                }
+                            )
+                            .allowsHitTesting(false)
+                        )
                     }
                     .coordinateSpace(name: "chatScroll")
-                    .background(
-                        ZStack {
-                            GeometryReader { geo in
-                                Color.clear.preference(key: ChatViewportHeightKey.self, value: geo.size.height)
-                            }
-
-                            HUDScrollCapture { _, _ in
-                                noteUserScrollInteraction()
-                            }
-                            .allowsHitTesting(false)
-                        }
-                    )
-                    .onPreferenceChange(ChatViewportHeightKey.self) { h in
-                        viewportHeight = h
-                        recomputePinnedState()
-                    }
-                    .onPreferenceChange(ChatBottomMaxYKey.self) { y in
-                        bottomMaxY = y
-                        recomputePinnedState()
-                    }
-                    .onChange(of: store.doc.chat.messages.count) { _ in
-                        guard isPinnedToBottom else { return }
-                        scheduleScrollToBottom(proxy, animated: true)
-                    }
-                    .onChange(of: lastMessageText) { _ in
-                        guard isPinnedToBottom else { return }
-
-                        // Throttle streaming scroll calls (tokens can update extremely fast).
-                        let now = CACurrentMediaTime()
-                        if now - lastStreamScrollAt < 0.08 { return }
-                        lastStreamScrollAt = now
-
-                        scheduleScrollToBottom(proxy, animated: false)
-                    }
                     .onAppear {
                         DispatchQueue.main.async {
                             scheduleScrollToBottom(proxy, animated: false)
@@ -1150,11 +1220,6 @@ struct ChatPanelView: View {
                         guard let cmd else { return }
                         applyFindCommand(cmd, proxy: proxy)
                         pendingFindCommand = nil
-                    }
-                    .onChange(of: isPinnedToBottom) { pinned in
-                        if !pinned {
-                            autoScrollWorkItem?.cancel()
-                        }
                     }
                 }
             }
@@ -2791,11 +2856,13 @@ private struct ChatRichTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.lineBreakMode = .byWordWrapping
+        textView.isAutomaticLinkDetectionEnabled = true
 
         // Make links look/behave like links.
         textView.linkTextAttributes = [
             .foregroundColor: NSColor.systemBlue,
-            .underlineStyle: NSUnderlineStyle.single.rawValue
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .cursor: NSCursor.pointingHand
         ]
 
         scrollView.documentView = textView
@@ -2929,6 +2996,15 @@ private struct ChatRichTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+            return openLink(link)
+        }
+
+        func textView(_ textView: NSTextView, shouldInteractWith url: URL, in characterRange: NSRange) -> Bool {
+            _ = openLink(url)
+            return false
+        }
+
+        private func openLink(_ link: Any) -> Bool {
             if let url = link as? URL {
                 NSWorkspace.shared.open(url)
                 return true
