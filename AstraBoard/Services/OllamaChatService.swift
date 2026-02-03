@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 // MARK: - Enhanced OllamaChatService with Improved Tool Support
 
@@ -406,18 +408,67 @@ class OllamaChatService {
                     // Always send the done chunk
                     await onChunk(chunk)
                 }
-                
-                if chunk.done == true {
-                    print("DEBUG: Stream complete. Accumulated content length: \(accumulatedContent.count)")
-                    if detectedToolCall == nil && !accumulatedContent.isEmpty {
-                        print("DEBUG: Final content: \(accumulatedContent)")
-                    }
-                    break
-                }
             } catch {
                 print("Failed to decode chunk: \(error)\nRAW: \(line)")
                 continue
             }
+        }
+    }
+
+    // MARK: - Token Counting (Debug)
+
+    func tokenCount(model: String, text: String) async -> Int {
+        guard let url = URL(string: "http://127.0.0.1:11434/api/tokenize") else {
+            return estimateTokenCount(for: text)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "prompt": text
+        ])
+
+        do {
+            let (data, response) = try await Self.session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                return estimateTokenCount(for: text)
+            }
+
+            let decoded = try JSONDecoder().decode(TokenizeResponse.self, from: data)
+            if let tokens = decoded.tokens {
+                return tokens.count
+            }
+            if let tokenCount = decoded.tokenCount {
+                return tokenCount
+            }
+            if let count = decoded.count {
+                return count
+            }
+        } catch {
+            return estimateTokenCount(for: text)
+        }
+
+        return estimateTokenCount(for: text)
+    }
+
+    private func estimateTokenCount(for text: String) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        return Int(ceil(Double(trimmed.count) / 4.0))
+    }
+
+    private struct TokenizeResponse: Codable {
+        let tokens: [Int]?
+        let count: Int?
+        let tokenCount: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case tokens
+            case count
+            case tokenCount = "token_count"
         }
     }
     
@@ -835,5 +886,500 @@ private enum DuckDuckGoLiteSearch {
         // Collapse whitespace
         s = s.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+// MARK: - Vision Tool Manager (Local Multimodal)
+
+actor VisionToolManager {
+    static let shared = VisionToolManager()
+
+    struct VisionToolPayload: Codable {
+        struct UIElement: Codable {
+            let type: String
+            let label: String
+            let bounds: String?
+        }
+
+        let caption: String
+        let ocrText: String
+        let visualDetails: [String]
+        let uiElements: [UIElement]
+        let confidence: Double
+
+        enum CodingKeys: String, CodingKey {
+            case caption
+            case ocrText = "ocr_text"
+            case visualDetails = "visual_details"
+            case uiElements = "ui_elements"
+            case confidence
+        }
+    }
+
+    enum VisionError: LocalizedError {
+        case noImages
+        case imageUnavailable
+        case imageDecodeFailed
+        case serverStartFailed(String)
+        case serverNotReady(String)
+        case modelUnavailable
+        case invalidResponse
+        case invalidJSON(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .noImages:
+                return "Vision error: No images were provided."
+            case .imageUnavailable:
+                return "Vision error: Image data is not available yet."
+            case .imageDecodeFailed:
+                return "Vision error: Unable to decode the image."
+            case .serverStartFailed(let details):
+                return "Vision server failed to start. \(details)"
+            case .serverNotReady(let details):
+                return "Vision server did not become ready. \(details)"
+            case .modelUnavailable:
+                return "Vision server is running but no multimodal model is available."
+            case .invalidResponse:
+                return "Vision server returned an invalid response."
+            case .invalidJSON(let snippet):
+                return "Vision model did not return valid JSON. \(snippet)"
+            }
+        }
+    }
+
+    private struct ModelList: Decodable {
+        struct Model: Decodable { let id: String }
+        let data: [Model]
+    }
+
+    private struct ChatResponse: Decodable {
+        struct Choice: Decodable {
+            struct Message: Decodable { let content: String? }
+            let message: Message
+        }
+        let choices: [Choice]
+    }
+
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 60
+        config.httpMaximumConnectionsPerHost = 1
+        return URLSession(configuration: config)
+    }()
+
+    private let baseURL = URL(string: "http://127.0.0.1:8000/v1")!
+    private var process: Process?
+    private var logFileHandle: FileHandle?
+    private var cachedModelId: String?
+    private var startTask: Task<Void, Error>?
+
+    private var modelsURL: URL { baseURL.appendingPathComponent("models") }
+    private var chatURL: URL { baseURL.appendingPathComponent("chat/completions") }
+
+    func analyze(userText: String, imageURLs: [URL]) async throws -> VisionToolPayload {
+        guard !imageURLs.isEmpty else { throw VisionError.noImages }
+        let modelId = try await ensureServerReady()
+        let imageDataURIs = try await Self.prepareImageDataURIs(from: imageURLs)
+        guard !imageDataURIs.isEmpty else { throw VisionError.imageUnavailable }
+
+        let prompt = Self.buildPrompt(userText: userText, strict: false)
+        let responseText = try await sendChat(model: modelId, prompt: prompt, imageDataURIs: imageDataURIs)
+
+        if let parsed = try? Self.decodePayload(from: responseText) {
+            return parsed
+        }
+
+        let strictPrompt = Self.buildPrompt(userText: userText, strict: true)
+        let responseTextRetry = try await sendChat(model: modelId, prompt: strictPrompt, imageDataURIs: imageDataURIs)
+
+        if let parsed = try? Self.decodePayload(from: responseTextRetry) {
+            return parsed
+        }
+
+        let snippet = responseTextRetry.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = snippet.prefix(200)
+        throw VisionError.invalidJSON(String(preview))
+    }
+
+    func shutdown() {
+        guard let process else { return }
+        if process.isRunning {
+            process.terminate()
+        }
+        let logHandle = logFileHandle
+        Task.detached {
+            process.waitUntilExit()
+            logHandle?.closeFile()
+        }
+        self.process = nil
+        self.logFileHandle = nil
+        self.cachedModelId = nil
+        self.startTask = nil
+    }
+
+    // MARK: - Server Management
+
+    private func ensureServerReady() async throws -> String {
+        if let modelId = await healthCheck() {
+            cachedModelId = modelId
+            return modelId
+        }
+
+        if startTask == nil {
+            startTask = Task { [weak self] in
+                guard let self else { return }
+                try await self.startServer()
+                try await self.waitForReady()
+            }
+        }
+
+        do {
+            try await startTask?.value
+        } catch {
+            startTask = nil
+            throw error
+        }
+
+        if let modelId = cachedModelId {
+            return modelId
+        }
+        throw VisionError.modelUnavailable
+    }
+
+    private func healthCheck() async -> String? {
+        var request = URLRequest(url: modelsURL)
+        request.httpMethod = "GET"
+
+        do {
+            let (data, response) = try await Self.session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+            let list = try JSONDecoder().decode(ModelList.self, from: data)
+            return selectModelId(from: list)
+        } catch {
+            return nil
+        }
+    }
+
+    private func startServer() async throws {
+        if let process, process.isRunning {
+            return
+        }
+
+        let executablePath = ("~/astra-vision/.venv/bin/mlx-openai-server" as NSString).expandingTildeInPath
+        let executableURL = URL(fileURLWithPath: executablePath)
+
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = [
+            "launch",
+            "--model-path", "mlx-community/Qwen2-VL-2B-Instruct-4bit",
+            "--model-type", "multimodal",
+            "--host", "127.0.0.1",
+            "--port", "8000"
+        ]
+
+        let logURL: URL
+        do {
+            logURL = try ensureLogFileURL()
+        } catch {
+            throw VisionError.serverStartFailed("Unable to create log file: \(error.localizedDescription)")
+        }
+        let logDirectory = logURL.deletingLastPathComponent()
+        process.currentDirectoryURL = logDirectory
+
+        let logHandle: FileHandle
+        do {
+            logHandle = try FileHandle(forWritingTo: logURL)
+        } catch {
+            throw VisionError.serverStartFailed("Unable to open log file: \(error.localizedDescription) (path: \(logURL.path))")
+        }
+        logHandle.seekToEndOfFile()
+
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+
+        process.terminationHandler = { [weak self] _ in
+            Task { await self?.handleProcessTermination() }
+        }
+
+        do {
+            try process.run()
+        } catch {
+            logHandle.closeFile()
+            throw VisionError.serverStartFailed("\(error.localizedDescription) (executable: \(executablePath))")
+        }
+
+        self.process = process
+        self.logFileHandle = logHandle
+    }
+
+    private func waitForReady(timeout: TimeInterval = 15.0) async throws {
+        let start = Date()
+        var delay: UInt64 = 200_000_000
+
+        while Date().timeIntervalSince(start) < timeout {
+            if let modelId = await healthCheck() {
+                cachedModelId = modelId
+                return
+            }
+
+            if let process, !process.isRunning {
+                let logPath = (try? ensureLogFileURL().path) ?? ""
+                throw VisionError.serverNotReady("Process exited. Log: \(logPath)")
+            }
+
+            try await Task.sleep(nanoseconds: delay)
+            delay = min(delay * 2, 1_000_000_000)
+        }
+
+        let logPath = (try? ensureLogFileURL().path) ?? ""
+        throw VisionError.serverNotReady("Timed out. Log: \(logPath)")
+    }
+
+    private func handleProcessTermination() async {
+        logFileHandle?.closeFile()
+        logFileHandle = nil
+        process = nil
+        cachedModelId = nil
+        startTask = nil
+    }
+
+    private func ensureLogFileURL() throws -> URL {
+        let fm = FileManager.default
+        let base = try fm.url(for: .libraryDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let logsDir = base.appendingPathComponent("Logs/Astra", isDirectory: true)
+        if !fm.fileExists(atPath: logsDir.path) {
+            try fm.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        }
+        let logURL = logsDir.appendingPathComponent("vision-server.log")
+        if !fm.fileExists(atPath: logURL.path) {
+            fm.createFile(atPath: logURL.path, contents: nil)
+        }
+        return logURL
+    }
+
+    private func selectModelId(from list: ModelList) -> String? {
+        if list.data.contains(where: { $0.id == "local-multimodal" }) {
+            return "local-multimodal"
+        }
+        if list.data.contains(where: { $0.id == "mlx-community/Qwen2-VL-2B-Instruct-4bit" }) {
+            return "mlx-community/Qwen2-VL-2B-Instruct-4bit"
+        }
+        return list.data.first?.id
+    }
+
+    // MARK: - Request/Response
+
+    private func sendChat(model: String, prompt: String, imageDataURIs: [String]) async throws -> String {
+        var content: [[String: Any]] = [
+            ["type": "text", "text": prompt]
+        ]
+        for uri in imageDataURIs {
+            content.append([
+                "type": "image_url",
+                "image_url": ["url": uri]
+            ])
+        }
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [
+                [
+                    "role": "user",
+                    "content": content
+                ]
+            ],
+            "temperature": 0.1,
+            "max_tokens": 900
+        ]
+
+        let data = try JSONSerialization.data(withJSONObject: body)
+        var request = URLRequest(url: chatURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+
+        let (respData, response) = try await Self.session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw VisionError.invalidResponse
+        }
+        let decoded = try JSONDecoder().decode(ChatResponse.self, from: respData)
+        guard let contentText = decoded.choices.first?.message.content else {
+            throw VisionError.invalidResponse
+        }
+        return contentText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: - Image Preparation
+
+    private static func prepareImageDataURIs(from urls: [URL]) async throws -> [String] {
+        try await Task.detached(priority: .userInitiated) {
+            var output: [String] = []
+            output.reserveCapacity(urls.count)
+
+            for url in urls {
+                guard let (data, mimeType) = try? loadImageData(url: url) else { continue }
+                let base64 = data.base64EncodedString()
+                output.append("data:\(mimeType);base64,\(base64)")
+            }
+
+            return output
+        }.value
+    }
+
+    private static func loadImageData(url: URL) throws -> (Data, String) {
+        let ext = url.pathExtension.lowercased()
+        if ext == "jpg" || ext == "jpeg" {
+            let data = try Data(contentsOf: url)
+            return (data, "image/jpeg")
+        }
+        if ext == "png" {
+            let data = try Data(contentsOf: url)
+            return (data, "image/png")
+        }
+
+        let data = try Data(contentsOf: url)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw VisionError.imageDecodeFailed
+        }
+
+        let mutable = NSMutableData()
+        let format = UTType.jpeg.identifier as CFString
+        guard let destination = CGImageDestinationCreateWithData(mutable, format, 1, nil) else {
+            throw VisionError.imageDecodeFailed
+        }
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: 0.85
+        ]
+        CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw VisionError.imageDecodeFailed
+        }
+
+        return (mutable as Data, "image/jpeg")
+    }
+
+    // MARK: - Prompt + Parsing
+
+    private static func buildPrompt(userText: String, strict: Bool) -> String {
+        var prompt = """
+        You are a vision system. Analyze the image and return ONLY valid JSON with exactly these keys:
+        {
+          "caption": string,
+          "ocr_text": string,
+          "visual_details": [string],
+          "ui_elements": [{"type": string, "label": string, "bounds": string|null}],
+          "confidence": number (0..1)
+        }
+        Rules:
+        - Do not include any markdown or code fences.
+        - "ocr_text" must include all visible text in reading order, or "" if none.
+        - "visual_details" should be a list of concrete, factual observations (max 12 items).
+        - "ui_elements" should include buttons, fields, menus, icons, etc when present; use [] if none (max 12 items).
+        - "bounds" can be null if unknown; otherwise use a concise "x,y,w,h" style string.
+        - "confidence" is your overall confidence from 0 to 1.
+        """
+
+        let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            prompt += "\nUser message: \(trimmed)"
+        }
+
+        if strict {
+            prompt += "\nReturn ONLY valid JSON. No markdown."
+        }
+
+        return prompt
+    }
+
+    private static func decodePayload(from text: String) throws -> VisionToolPayload {
+        let cleaned = stripMarkdownCodeFence(text)
+        let candidate = extractJSONObject(from: cleaned) ?? cleaned
+
+        guard let data = candidate.data(using: .utf8) else {
+            throw VisionError.invalidJSON("Unreadable response.")
+        }
+
+        if let decoded = try? JSONDecoder().decode(VisionToolPayload.self, from: data) {
+            return decoded
+        }
+
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return coercePayload(from: obj)
+        }
+
+        throw VisionError.invalidJSON("Invalid JSON.")
+    }
+
+    private static func stripMarkdownCodeFence(_ text: String) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("```") {
+            if let firstLineEnd = trimmed.range(of: "\n") {
+                trimmed = String(trimmed[firstLineEnd.upperBound...])
+            }
+        }
+        if let range = trimmed.range(of: "```", options: .backwards) {
+            trimmed = String(trimmed[..<range.lowerBound])
+        }
+        return trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func extractJSONObject(from text: String) -> String? {
+        var depth = 0
+        var start: String.Index?
+        for idx in text.indices {
+            let ch = text[idx]
+            if ch == "{" {
+                if depth == 0 { start = idx }
+                depth += 1
+            } else if ch == "}" {
+                if depth > 0 {
+                    depth -= 1
+                    if depth == 0, let start {
+                        return String(text[start...idx])
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func coercePayload(from obj: [String: Any]) -> VisionToolPayload {
+        let caption = obj["caption"] as? String ?? ""
+        let ocrText = obj["ocr_text"] as? String ?? ""
+        let visualDetails: [String] = {
+            if let arr = obj["visual_details"] as? [Any] {
+                return arr.map { String(describing: $0) }
+            }
+            return []
+        }()
+        let uiElements: [VisionToolPayload.UIElement] = {
+            guard let arr = obj["ui_elements"] as? [Any] else { return [] }
+            return arr.compactMap { item in
+                guard let dict = item as? [String: Any] else { return nil }
+                let type = dict["type"] as? String ?? ""
+                let label = dict["label"] as? String ?? ""
+                let bounds = dict["bounds"] as? String
+                return VisionToolPayload.UIElement(type: type, label: label, bounds: bounds)
+            }
+        }()
+        let confidence: Double = {
+            if let n = obj["confidence"] as? Double { return n }
+            if let n = obj["confidence"] as? Int { return Double(n) }
+            if let s = obj["confidence"] as? String, let n = Double(s) { return n }
+            return 0
+        }()
+
+        return VisionToolPayload(
+            caption: caption,
+            ocrText: ocrText,
+            visualDetails: visualDetails,
+            uiElements: uiElements,
+            confidence: confidence
+        )
     }
 }

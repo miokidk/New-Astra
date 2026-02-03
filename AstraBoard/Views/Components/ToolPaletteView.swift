@@ -125,6 +125,20 @@ struct ToolPaletteView: View {
             .buttonStyle(.plain)
 
             Button {
+                store.togglePanel(.systemInstructions)
+                store.hideToolMenu()
+            } label: {
+                Image(systemName: "terminal")
+                    .frame(width: 32, height: 32)
+                    .background(store.doc.ui.panels.systemInstructions.isOpen ? activeButtonBackground : buttonBackground)
+                    .foregroundColor(.primary)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
+                    .cornerRadius(8)
+                    .help("System Instructions")
+            }
+            .buttonStyle(.plain)
+
+            Button {
                 store.togglePanel(.memories)
                 store.hideToolMenu()
             } label: {

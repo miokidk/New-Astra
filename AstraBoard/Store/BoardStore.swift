@@ -19,7 +19,7 @@ private let textEntryChunkMaxLength = 2000
 private let textEntryChunkSpacing: CGFloat = 16
 
 enum PanelKind {
-    case chat, chatArchive, log, memories, shapeStyle, settings, reminder
+    case chat, chatArchive, log, memories, shapeStyle, settings, systemInstructions, reminder
 
     static let defaultZOrder: [PanelKind] = [
         .chat,
@@ -28,6 +28,7 @@ enum PanelKind {
         .memories,
         .shapeStyle,
         .settings,
+        .systemInstructions,
         .reminder
     ]
 }
@@ -37,10 +38,13 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     static let hudSize = CGSize(width: 780, height: 83)
     static let panelMinSize = CGSize(width: 260, height: 200)
     private static let settingsPanelMinSize = CGSize(width: 460, height: 520)
+    private static let systemInstructionsPanelMinSize = CGSize(width: 520, height: 420)
     static func panelMinSize(for kind: PanelKind) -> CGSize {
         switch kind {
         case .settings:
             return settingsPanelMinSize
+        case .systemInstructions:
+            return systemInstructionsPanelMinSize
         default:
             return panelMinSize
         }
@@ -59,6 +63,11 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     private let chatService = OllamaChatService()
     private var chatReplyTask: Task<Void, Never>?
     private let chatModelName = "astra:oss20b"
+    let modelfileURL = URL(fileURLWithPath: "/Users/astra/Documents/Astra/AstraBoard/Modelfile")
+    private let modelfileSystemMarker = "SYSTEM \"\"\""
+    private let contextTokenLimit = 2000
+    private let contextKeepTailCount = 4
+    private var isCompilingContext = false
 
     @Published var doc: BoardDoc {
         didSet {
@@ -211,6 +220,10 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     @Published private(set) var canUndo: Bool = false
     @Published private(set) var canRedo: Bool = false
     @Published var activeReminderPanelId: UUID? // New property for active reminder panel
+    @Published var systemInstructionsDraft: String = ""
+    @Published private(set) var systemInstructionsLastLoaded: String = ""
+    @Published private(set) var systemInstructionsStatus: String?
+    @Published private(set) var isSystemInstructionsBusy: Bool = false
 
     private struct BoardSnapshot {
         let doc: BoardDoc
@@ -356,6 +369,18 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
         } else if workingDoc.chatSettings.alwaysListening == defaultAlwaysListening
                     && globals.alwaysListening != defaultAlwaysListening {
             workingDoc.chatSettings.alwaysListening = globals.alwaysListening
+            didMutateDoc = true
+        }
+
+        // Vision Debug
+        let defaultVisionDebug = ChatSettings.defaultVisionDebug
+        if globals.visionDebug == defaultVisionDebug
+            && workingDoc.chatSettings.visionDebug != defaultVisionDebug {
+            globals.visionDebug = workingDoc.chatSettings.visionDebug
+            didMutateGlobals = true
+        } else if workingDoc.chatSettings.visionDebug == defaultVisionDebug
+                    && globals.visionDebug != defaultVisionDebug {
+            workingDoc.chatSettings.visionDebug = globals.visionDebug
             didMutateDoc = true
         }
 
@@ -830,6 +855,7 @@ extension BoardStore {
             notes: doc.chatSettings.notes,
             voice: doc.chatSettings.voice,
             alwaysListening: doc.chatSettings.alwaysListening,
+            visionDebug: doc.chatSettings.visionDebug,
             memories: doc.memories,
             log: doc.log,
             chatHistory: doc.chatHistory,
@@ -1169,6 +1195,7 @@ extension BoardStore {
         doc.chatSettings.notes = loadedGlobals.notes
         doc.chatSettings.voice = loadedGlobals.voice
         doc.chatSettings.alwaysListening = loadedGlobals.alwaysListening
+        doc.chatSettings.visionDebug = loadedGlobals.visionDebug
         doc.memories = loadedGlobals.memories
         doc.log = loadedGlobals.log
         doc.chatHistory = loadedGlobals.chatHistory
@@ -1187,6 +1214,7 @@ extension BoardStore {
             notes: doc.chatSettings.notes,
             voice: doc.chatSettings.voice,
             alwaysListening: doc.chatSettings.alwaysListening,
+            visionDebug: doc.chatSettings.visionDebug,
             memories: doc.memories,
             log: doc.log,
             chatHistory: doc.chatHistory,
@@ -1211,6 +1239,7 @@ extension BoardStore {
                 notes: doc.chatSettings.notes,
                 voice: doc.chatSettings.voice,
                 alwaysListening: doc.chatSettings.alwaysListening,
+                visionDebug: doc.chatSettings.visionDebug,
                 memories: doc.memories,
                 log: doc.log,
                 chatHistory: doc.chatHistory,
@@ -2886,6 +2915,8 @@ extension BoardStore {
             doc.ui.panels.shapeStyle.isOpen.toggle()
         case .settings:
             doc.ui.panels.settings.isOpen.toggle()
+        case .systemInstructions:
+            doc.ui.panels.systemInstructions.isOpen.toggle()
         case .reminder: // Handle new reminder case
             doc.ui.panels.reminder.isOpen.toggle()
         }
@@ -2927,6 +2958,11 @@ extension BoardStore {
             doc.ui.panels.settings.y = clamped.origin.y.double
             doc.ui.panels.settings.w = clamped.size.width.double
             doc.ui.panels.settings.h = clamped.size.height.double
+        case .systemInstructions:
+            doc.ui.panels.systemInstructions.x = clamped.origin.x.double
+            doc.ui.panels.systemInstructions.y = clamped.origin.y.double
+            doc.ui.panels.systemInstructions.w = clamped.size.width.double
+            doc.ui.panels.systemInstructions.h = clamped.size.height.double
         case .reminder: // Handle new reminder case
             doc.ui.panels.reminder.x = clamped.origin.x.double
             doc.ui.panels.reminder.y = clamped.origin.y.double
@@ -2950,6 +2986,8 @@ extension BoardStore {
             isOpen = doc.ui.panels.shapeStyle.isOpen
         case .settings:
             isOpen = doc.ui.panels.settings.isOpen
+        case .systemInstructions:
+            isOpen = doc.ui.panels.systemInstructions.isOpen
         case .reminder:
             isOpen = doc.ui.panels.reminder.isOpen
         }
@@ -2979,6 +3017,8 @@ extension BoardStore {
             box = doc.ui.panels.shapeStyle
         case .settings:
             box = doc.ui.panels.settings
+        case .systemInstructions:
+            box = doc.ui.panels.systemInstructions
         case .reminder:
             box = doc.ui.panels.reminder
         }
@@ -3004,6 +3044,8 @@ extension BoardStore {
             doc.ui.panels.shapeStyle = updated
         case .settings:
             doc.ui.panels.settings = updated
+        case .systemInstructions:
+            doc.ui.panels.systemInstructions = updated
         case .reminder:
             doc.ui.panels.reminder = updated
         }
@@ -3040,6 +3082,182 @@ extension BoardStore {
         let x = min(max(rawX, padding), viewport.width - width - padding)
         let y = min(max(rawY, padding), viewport.height - height - padding)
         return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+// MARK: - System Instructions
+extension BoardStore {
+    private enum ModelfileError: LocalizedError {
+        case systemBlockMissing
+        case systemBlockUnterminated
+        case buildFailed(Int, String)
+
+        var errorDescription: String? {
+            switch self {
+            case .systemBlockMissing:
+                return "SYSTEM block not found in Modelfile."
+            case .systemBlockUnterminated:
+                return "SYSTEM block is missing a closing \"\"\"."
+            case .buildFailed(let code, let output):
+                if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return "Ollama create failed (exit code \(code))."
+                }
+                return "Ollama create failed (exit code \(code)): \(output.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+        }
+    }
+
+    @MainActor
+    func loadSystemInstructionsIfNeeded(force: Bool = false) {
+        let hasUnsavedChanges = systemInstructionsDraft != systemInstructionsLastLoaded
+        if !force && hasUnsavedChanges {
+            return
+        }
+        do {
+            let contents = try String(contentsOf: modelfileURL, encoding: .utf8)
+            let instructions = try extractSystemInstructions(from: contents)
+            systemInstructionsDraft = instructions
+            systemInstructionsLastLoaded = instructions
+            systemInstructionsStatus = nil
+        } catch {
+            systemInstructionsStatus = "Load failed: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    func applySystemInstructionsAndRebuild() {
+        guard !isSystemInstructionsBusy else { return }
+        let trimmed = systemInstructionsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            systemInstructionsStatus = "System instructions cannot be empty."
+            return
+        }
+
+        isSystemInstructionsBusy = true
+        systemInstructionsStatus = "Updating Modelfile…"
+
+        Task {
+            do {
+                let updated = try updateModelfileSystemInstructions(trimmed)
+                try updated.write(to: modelfileURL, atomically: true, encoding: .utf8)
+                await MainActor.run {
+                    systemInstructionsDraft = trimmed
+                    systemInstructionsLastLoaded = trimmed
+                }
+                await MainActor.run {
+                    systemInstructionsStatus = "Rebuilding model…"
+                }
+                try await runOllamaCreate(modelfileURL: modelfileURL)
+                await MainActor.run {
+                    systemInstructionsStatus = "Model rebuilt."
+                }
+            } catch {
+                await MainActor.run {
+                    systemInstructionsStatus = "Update failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run {
+                isSystemInstructionsBusy = false
+            }
+        }
+    }
+
+    private func extractSystemInstructions(from contents: String) throws -> String {
+        guard let startRange = contents.range(of: modelfileSystemMarker) else {
+            throw ModelfileError.systemBlockMissing
+        }
+        let afterStart = startRange.upperBound
+        guard let endRange = contents.range(of: "\"\"\"", range: afterStart..<contents.endIndex) else {
+            throw ModelfileError.systemBlockUnterminated
+        }
+        var extracted = String(contents[afterStart..<endRange.lowerBound])
+        if extracted.hasPrefix("\n") {
+            extracted.removeFirst()
+        }
+        if extracted.hasSuffix("\n") {
+            extracted.removeLast()
+        }
+        return extracted
+    }
+
+    private func currentModelfileSystemInstructions() -> String? {
+        if let contents = try? String(contentsOf: modelfileURL, encoding: .utf8),
+           let extracted = try? extractSystemInstructions(from: contents) {
+            return extracted
+        }
+        if !systemInstructionsLastLoaded.isEmpty {
+            return systemInstructionsLastLoaded
+        }
+        return nil
+    }
+
+    private func combinedSystemPrompt() -> String {
+        let toolPrompt = ToolRegistry.systemPrompt()
+        guard let rawInstructions = currentModelfileSystemInstructions() else {
+            return toolPrompt
+        }
+        let trimmed = rawInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return toolPrompt }
+        return """
+        ## SYSTEM INSTRUCTIONS (HIGHEST PRIORITY)
+        \(trimmed)
+
+        \(toolPrompt)
+        """
+    }
+
+    private func systemMessageForChat() -> OllamaChatService.Message {
+        OllamaChatService.Message(role: "system", content: combinedSystemPrompt())
+    }
+
+    private func updateModelfileSystemInstructions(_ instructions: String) throws -> String {
+        let contents = try String(contentsOf: modelfileURL, encoding: .utf8)
+        guard let startRange = contents.range(of: modelfileSystemMarker) else {
+            throw ModelfileError.systemBlockMissing
+        }
+        let afterStart = startRange.upperBound
+        guard let endRange = contents.range(of: "\"\"\"", range: afterStart..<contents.endIndex) else {
+            throw ModelfileError.systemBlockUnterminated
+        }
+        let replacement = "\(modelfileSystemMarker)\n\(instructions)\n\"\"\""
+        return contents.replacingCharacters(in: startRange.lowerBound..<endRange.upperBound, with: replacement)
+    }
+
+    private func runOllamaCreate(modelfileURL: URL) async throws {
+        let modelName = chatModelName
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["ollama", "create", modelName, "-f", modelfileURL.path]
+                var environment = ProcessInfo.processInfo.environment
+                let path = environment["PATH"] ?? ""
+                let preferred = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                environment["PATH"] = path.isEmpty ? preferred : "\(path):\(preferred)"
+                process.environment = environment
+
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+
+                do {
+                    try process.run()
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
+
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
+
+                if process.terminationStatus == 0 {
+                    continuation.resume(returning: ())
+                } else {
+                    continuation.resume(throwing: ModelfileError.buildFailed(Int(process.terminationStatus), output))
+                }
+            }
+        }
     }
 }
 
@@ -3171,10 +3389,18 @@ extension BoardStore {
 // MARK: - Chat (disabled)
 extension BoardStore {
     @MainActor
+    private func archiveChatIfNeeded(_ thread: ChatThread) {
+        guard !thread.messages.isEmpty else { return }
+        doc.chatHistory.removeAll { $0.id == thread.id }
+        doc.chatHistory.append(thread)
+    }
+
+    @MainActor
     func startNewChat(reason: String? = nil) {
         guard !doc.chat.messages.isEmpty || chatWarning != nil else { return }
         stopChatReplies()
         recordUndoSnapshot()
+        archiveChatIfNeeded(doc.chat)
         doc.chat = ChatThread(id: UUID(), messages: [], title: nil)
         chatWarning = reason
         chatActivityStatus = nil
@@ -3212,9 +3438,24 @@ extension BoardStore {
 
     @MainActor
     func resumeArchivedChat(id: UUID) {
+        guard let archived = archivedChat(id: id) else { return }
+        stopChatReplies()
         recordUndoSnapshot()
+        archiveChatIfNeeded(doc.chat)
+        doc.chatHistory.removeAll { $0.id == id }
+        doc.chat = archived
         activeArchivedChatId = nil
         if !doc.ui.panels.chat.isOpen { doc.ui.panels.chat.isOpen = true }
+        chatWarning = nil
+        chatActivityStatus = nil
+        chatThinkingText = nil
+        chatThinkingExpanded = false
+        chatDraftImages.removeAll()
+        chatDraftFiles.removeAll()
+        doc.pendingClarification = nil
+        chatNeedsAttention = false
+        pendingChatReplies = 0
+        queuedUserMessageIDs.removeAll()
         touch()
     }
 
@@ -3287,9 +3528,37 @@ extension BoardStore {
         }
     }
 
+    private func contextSummaryMessage() -> OllamaChatService.Message? {
+        let summaries = doc.chat.contextSummaries
+        guard !summaries.isEmpty else { return nil }
+        let summaryText = summaries.joined(separator: "\n")
+        return OllamaChatService.Message(
+            role: "system",
+            content: "Conversation summary (oldest to newest):\n\(summaryText)"
+        )
+    }
+
+    private func contextMessages(upTo endIndexExclusive: Int) -> [ChatMsg] {
+        if doc.chat.contextSummaries.isEmpty {
+            guard endIndexExclusive > 0 else { return [] }
+            return Array(doc.chat.messages[0..<endIndexExclusive])
+        }
+        let tailStart = max(0, endIndexExclusive - contextKeepTailCount)
+        let startIndex = min(doc.chat.summarizedMessageCount, tailStart)
+        guard startIndex < endIndexExclusive else { return [] }
+        return Array(doc.chat.messages[startIndex..<endIndexExclusive])
+    }
+
     private func requestMessagesForCurrentChat() -> [OllamaChatService.Message] {
         guard doc.chat.messages.count > 1 else { return [] }
-        return doc.chat.messages.dropLast().compactMap { message in
+        let endIndex = doc.chat.messages.count - 1
+        let messagesToInclude = contextMessages(upTo: endIndex)
+        var out: [OllamaChatService.Message] = []
+        out.append(systemMessageForChat())
+        if let summaryMessage = contextSummaryMessage() {
+            out.append(summaryMessage)
+        }
+        out.append(contentsOf: messagesToInclude.compactMap { message in
             // Convert images to base64
             var imageData: [[String: String]] = []
             for imageRef in message.images {
@@ -3352,9 +3621,11 @@ extension BoardStore {
                 role: message.role.rawValue,
                 content: message.text,
                 images: imageData.isEmpty ? nil : imageData,
-                files: fileData.isEmpty ? nil : fileData
+                files: fileData.isEmpty ? nil : fileData,
+                toolResults: message.toolResults
             )
-        }
+        })
+        return out
     }
 
     @MainActor
@@ -3380,7 +3651,11 @@ extension BoardStore {
                 while true {
                     var capturedToolCall: ToolCall? = nil
 
-                    try await self.chatService.stream(model: self.chatModelName, messages: conversation) { chunk in
+                    try await self.chatService.stream(
+                        model: self.chatModelName,
+                        messages: conversation,
+                        includeSystemPrompt: false
+                    ) { chunk in
                         // Normal assistant content streaming
                         let delta = chunk.message?.content ?? ""
                         if !delta.isEmpty {
@@ -3462,7 +3737,267 @@ extension BoardStore {
             }
         }
         chatReplyTask = nil
+        if !canceled {
+            logConversationTokenCountAndMaybeCompile()
+        }
         startChatReplyIfIdle()
+    }
+
+    @MainActor
+    private func logConversationTokenCountAndMaybeCompile() {
+        let messagesSnapshot = doc.chat.messages
+        let summariesSnapshot = doc.chat.contextSummaries
+        let summarizedCountSnapshot = doc.chat.summarizedMessageCount
+        let model = chatModelName
+        let service = chatService
+        let tokenLimit = contextTokenLimit
+
+        Task.detached { [weak self] in
+            let contextText = Self.contextTextForTokenCount(
+                summaries: summariesSnapshot,
+                messages: messagesSnapshot,
+                summarizedMessageCount: summarizedCountSnapshot
+            )
+            let total = await service.tokenCount(model: model, text: contextText)
+            print(
+                "DEBUG: Chat token count (messages=\(messagesSnapshot.count), summaries=\(summariesSnapshot.count)) = \(total)"
+            )
+            print("DEBUG: Context snapshot (tokenCount=\(total)):\n\(contextText)")
+            if total > tokenLimit {
+                await MainActor.run {
+                    self?.compileContextIfNeeded()
+                }
+            }
+        }
+    }
+
+    private nonisolated static func contextTextForTokenCount(
+        summaries: [String],
+        messages: [ChatMsg],
+        summarizedMessageCount: Int
+    ) -> String {
+        var sections: [String] = []
+        if !summaries.isEmpty {
+            sections.append("Summary:\n" + summaries.joined(separator: "\n"))
+        }
+        if summaries.isEmpty {
+            let lines = messages.map { messageEntryLine($0) }
+            if !lines.isEmpty {
+                sections.append(lines.joined(separator: "\n"))
+            }
+        } else {
+            let startIndex = min(summarizedMessageCount, messages.count)
+            if startIndex < messages.count {
+                let remaining = messages[startIndex...].map { messageEntryLine($0) }
+                sections.append(remaining.joined(separator: "\n"))
+            }
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private nonisolated static func messageEntryLine(_ message: ChatMsg) -> String {
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = trimmed.isEmpty ? "[attachment]" : trimmed
+        let roleLabel: String
+        switch message.role {
+        case .user:
+            roleLabel = "User"
+        case .assistant:
+            roleLabel = "Assistant"
+        }
+        return "\(roleLabel): \(body)"
+    }
+
+    @MainActor
+    private func compileContextIfNeeded() {
+        guard !isCompilingContext else { return }
+        let messagesSnapshot = doc.chat.messages
+        let summariesSnapshot = doc.chat.contextSummaries
+        let summarizedCountSnapshot = doc.chat.summarizedMessageCount
+        let model = chatModelName
+        let service = chatService
+        let tokenLimit = contextTokenLimit
+        let keepTailCount = contextKeepTailCount
+
+        isCompilingContext = true
+        Task.detached { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor in
+                    self.isCompilingContext = false
+                }
+            }
+
+            let contextText = Self.contextTextForTokenCount(
+                summaries: summariesSnapshot,
+                messages: messagesSnapshot,
+                summarizedMessageCount: summarizedCountSnapshot
+            )
+            let total = await service.tokenCount(model: model, text: contextText)
+            guard total > tokenLimit else { return }
+
+            let targetSummarizedCount = max(0, messagesSnapshot.count - keepTailCount)
+            var newSummaries = summariesSnapshot
+            var newSummarizedCount = summarizedCountSnapshot
+
+            if summarizedCountSnapshot < targetSummarizedCount {
+                let toSummarize = Array(messagesSnapshot[summarizedCountSnapshot..<targetSummarizedCount])
+                let newLines = await Self.summarizeMessages(toSummarize, model: model, service: service)
+                if !newLines.isEmpty {
+                    newSummaries.append(contentsOf: newLines)
+                    newSummarizedCount = targetSummarizedCount
+                }
+            }
+
+            newSummaries = await Self.compressSummariesIfNeeded(
+                summaries: newSummaries,
+                model: model,
+                tokenLimit: tokenLimit,
+                service: service
+            )
+
+            await MainActor.run {
+                guard self.doc.chat.summarizedMessageCount == summarizedCountSnapshot,
+                      self.doc.chat.messages.count == messagesSnapshot.count,
+                      self.doc.chat.contextSummaries == summariesSnapshot else { return }
+                self.doc.chat.contextSummaries = newSummaries
+                self.doc.chat.summarizedMessageCount = newSummarizedCount
+                self.touch()
+            }
+        }
+    }
+
+    private nonisolated static func summarizeMessages(
+        _ messages: [ChatMsg],
+        model: String,
+        service: OllamaChatService
+    ) async -> [String] {
+        let entries = messages.map { messageEntryLine($0) }
+        guard !entries.isEmpty else { return [] }
+
+        let systemPrompt = """
+        You are a concise conversation summarizer.
+        For each entry, output one line in the same order.
+        Each line must start with 'User:' or 'Assistant:' to match the entry.
+        Keep each line under 20 words. Output only the lines.
+        """
+
+        let userPrompt = "Entries:\n" + entries.joined(separator: "\n")
+        let output = await summarizeText(
+            model: model,
+            service: service,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt
+        )
+        return parseSummaryLines(output)
+    }
+
+    private nonisolated static func summarizeSummaryChunks(
+        _ chunks: [[String]],
+        model: String,
+        service: OllamaChatService
+    ) async -> [String] {
+        guard !chunks.isEmpty else { return [] }
+
+        let systemPrompt = """
+        You are summarizing stacked conversation summaries.
+        Summarize each chunk into one concise line, in order.
+        Output only the lines.
+        """
+
+        var userPrompt = ""
+        for (index, chunk) in chunks.enumerated() {
+            userPrompt += "Chunk \(index + 1):\n"
+            userPrompt += chunk.joined(separator: "\n")
+            userPrompt += "\n\n"
+        }
+
+        let output = await summarizeText(
+            model: model,
+            service: service,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt
+        )
+        return parseSummaryLines(output)
+    }
+
+    private nonisolated static func summarizeText(
+        model: String,
+        service: OllamaChatService,
+        systemPrompt: String,
+        userPrompt: String
+    ) async -> String {
+        var output = ""
+        do {
+            try await service.stream(
+                model: model,
+                messages: [
+                    OllamaChatService.Message(role: "system", content: systemPrompt),
+                    OllamaChatService.Message(role: "user", content: userPrompt)
+                ],
+                includeSystemPrompt: false,
+                includeTools: false
+            ) { chunk in
+                if let content = chunk.message?.content {
+                    output += content
+                }
+            }
+        } catch {
+            return ""
+        }
+        return output
+    }
+
+    private nonisolated static func parseSummaryLines(_ text: String) -> [String] {
+        text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private nonisolated static func compressSummariesIfNeeded(
+        summaries: [String],
+        model: String,
+        tokenLimit: Int,
+        service: OllamaChatService
+    ) async -> [String] {
+        guard !summaries.isEmpty else { return summaries }
+
+        var summaries = summaries
+        var iterations = 0
+
+        while iterations < 4 {
+            let tokenCount = await service.tokenCount(model: model, text: summaries.joined(separator: "\n"))
+            if tokenCount <= tokenLimit {
+                break
+            }
+
+            let ratio = Double(tokenCount) / Double(tokenLimit)
+            let chunkSize = max(2, Int(ceil(ratio)))
+            let chunks = chunked(summaries, size: chunkSize)
+            let compressed = await summarizeSummaryChunks(chunks, model: model, service: service)
+            if compressed.isEmpty {
+                break
+            }
+
+            summaries = compressed
+            iterations += 1
+        }
+
+        return summaries
+    }
+
+    private nonisolated static func chunked<T>(_ items: [T], size: Int) -> [[T]] {
+        guard size > 0 else { return [] }
+        var result: [[T]] = []
+        result.reserveCapacity((items.count + size - 1) / size)
+        var index = 0
+        while index < items.count {
+            let end = min(index + size, items.count)
+            result.append(Array(items[index..<end]))
+            index = end
+        }
+        return result
     }
 
     @MainActor
@@ -5133,7 +5668,25 @@ extension BoardStore {
         guard messageIndex > 0,
               doc.chat.messages.indices.contains(messageIndex - 1) else { return [] }
 
-        // Only include the most recent message; Ollama keeps earlier turns in its own context.
+        let lastIndex = messageIndex - 1
+        var out: [OllamaChatService.Message] = []
+        out.append(systemMessageForChat())
+        if let summaryMessage = contextSummaryMessage() {
+            out.append(summaryMessage)
+        }
+        var prefixMessages = contextMessages(upTo: lastIndex)
+        if prefixMessages.isEmpty && lastIndex > 0 {
+            prefixMessages = Array(doc.chat.messages[0..<lastIndex])
+        }
+        for msg in prefixMessages {
+            out.append(
+                OllamaChatService.Message(
+                    role: msg.role.rawValue,
+                    content: msg.text,
+                    toolResults: msg.toolResults
+                )
+            )
+        }
 
         // 1) Snapshot (FAST, on MainActor): resolve URLs + mime types
         struct Snapshot: Sendable {
@@ -5144,6 +5697,7 @@ extension BoardStore {
             let content: String
             let images: [ImageItem]
             let files: [FileItem]
+            let toolResults: [ToolResponse]?
         }
 
         func mimeType(for ext: String, default fallback: String) -> String {
@@ -5170,7 +5724,7 @@ extension BoardStore {
             }
         }
 
-        let snapshots: [Snapshot] = [doc.chat.messages[messageIndex - 1]].compactMap { message in
+        let snapshots: [Snapshot] = [doc.chat.messages[lastIndex]].compactMap { message in
             var images: [Snapshot.ImageItem] = []
             images.reserveCapacity(message.images.count)
 
@@ -5195,12 +5749,13 @@ extension BoardStore {
                 role: message.role.rawValue,
                 content: message.text,
                 images: images,
-                files: files
+                files: files,
+                toolResults: message.toolResults
             )
         }
 
         // 2) Heavy work OFF MainActor: Data(contentsOf:) + base64
-        return await Task.detached(priority: .userInitiated) {
+        let withAttachments = await Task.detached(priority: .userInitiated) {
             return snapshots.map { snap in
                 var imageData: [[String: String]] = []
                 imageData.reserveCapacity(snap.images.count)
@@ -5233,10 +5788,13 @@ extension BoardStore {
                     role: snap.role,
                     content: snap.content,
                     images: imageData.isEmpty ? nil : imageData,
-                    files: fileData.isEmpty ? nil : fileData
+                    files: fileData.isEmpty ? nil : fileData,
+                    toolResults: snap.toolResults
                 )
             }
         }.value
+        out.append(contentsOf: withAttachments)
+        return out
     }
 }
 
@@ -5288,10 +5846,24 @@ extension BoardStore {
                 touch()
             }
 
+            do {
+                try await attachVisionToolResultIfNeeded(for: userIndex)
+            } catch {
+                self.handleChatReplyError(for: assistantMessageID, error: error)
+                return
+            }
+
             let t_buildStart = CFAbsoluteTimeGetCurrent()
             print("TTFR(BoardStore) building request messages...")
 
             let requestMessages = await requestMessagesForCurrentChatWithTools(upTo: assistantMessageIndex)
+            print("DEBUG: requestMessages=\(requestMessages.count)")
+            for (idx, msg) in requestMessages.enumerated() {
+                let preview = msg.content
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .prefix(80)
+                print("DEBUG: msg[\(idx)] role=\(msg.role) preview=\(preview)")
+            }
             
             var accumulated = ""
             var thinkingAccumulated = ""
@@ -5304,7 +5876,7 @@ extension BoardStore {
                 try await self.chatService.stream(
                     model: self.chatModelName,
                     messages: requestMessages,
-                    includeSystemPrompt: true
+                    includeSystemPrompt: false
                 ) { chunk in
                     if !didLogFirstChunk {
                         didLogFirstChunk = true
@@ -5379,6 +5951,49 @@ extension BoardStore {
         }
     }
     
+    // MARK: - Vision Tool Preprocessing
+    
+    @MainActor
+    private func attachVisionToolResultIfNeeded(for userIndex: Int) async throws {
+        guard doc.chat.messages.indices.contains(userIndex) else { return }
+        let message = doc.chat.messages[userIndex]
+        guard message.role == .user else { return }
+        guard !message.images.isEmpty else { return }
+
+        if let toolResults = message.toolResults,
+           toolResults.contains(where: { $0.toolCallId.hasPrefix("vision_") }) {
+            return
+        }
+
+        let urls = message.images.compactMap { imageURL(for: $0) }
+        guard !urls.isEmpty else {
+            throw VisionToolManager.VisionError.imageUnavailable
+        }
+
+        chatActivityStatus = "Analyzing image..."
+        defer { chatActivityStatus = nil }
+
+        let payload = try await VisionToolManager.shared.analyze(userText: message.text, imageURLs: urls)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let jsonData = try encoder.encode(payload)
+        let jsonString = String(data: jsonData, encoding: .utf8) ?? "{}"
+
+        var updated = message
+        var results = updated.toolResults ?? []
+        results.removeAll { $0.toolCallId.hasPrefix("vision_") }
+        results.append(
+            ToolResponse(
+                toolCallId: "vision_\(message.id.uuidString)",
+                result: jsonString,
+                success: true
+            )
+        )
+        updated.toolResults = results
+        doc.chat.messages[userIndex] = updated
+        touch()
+    }
+
     // MARK: - Async Tool Call Handler
     
     /// Handle tool execution asynchronously with immediate user feedback

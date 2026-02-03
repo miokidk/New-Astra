@@ -14,6 +14,7 @@ struct AppGlobalSettings: Codable {
     var notes: String
     var voice: String
     var alwaysListening: Bool
+    var visionDebug: Bool
     var memories: [Memory]
     var log: [LogItem]
     var chatHistory: [ChatThread]
@@ -24,6 +25,7 @@ struct AppGlobalSettings: Codable {
         notes: "",
         voice: ChatSettings.defaultVoice,
         alwaysListening: ChatSettings.defaultAlwaysListening,
+        visionDebug: ChatSettings.defaultVisionDebug,
         memories: [],
         log: [],
         chatHistory: [],
@@ -31,13 +33,14 @@ struct AppGlobalSettings: Codable {
     )
 
     private enum CodingKeys: String, CodingKey {
-        case userName, notes, voice, alwaysListening, memories, log, chatHistory, reminders
+        case userName, notes, voice, alwaysListening, visionDebug, memories, log, chatHistory, reminders
     }
 
     init(userName: String,
          notes: String,
          voice: String,
          alwaysListening: Bool,
+         visionDebug: Bool,
          memories: [Memory],
          log: [LogItem],
          chatHistory: [ChatThread],
@@ -46,6 +49,7 @@ struct AppGlobalSettings: Codable {
         self.notes = notes
         self.voice = voice
         self.alwaysListening = alwaysListening
+        self.visionDebug = visionDebug
         self.memories = memories
         self.log = log
         self.chatHistory = chatHistory
@@ -63,6 +67,7 @@ struct AppGlobalSettings: Codable {
         let rawVoice = try c.decodeIfPresent(String.self, forKey: .voice) ?? ChatSettings.defaultVoice
         voice = ChatSettings.availableVoices.contains(rawVoice) ? rawVoice : ChatSettings.defaultVoice
         alwaysListening = try c.decodeIfPresent(Bool.self, forKey: .alwaysListening) ?? ChatSettings.defaultAlwaysListening
+        visionDebug = try c.decodeIfPresent(Bool.self, forKey: .visionDebug) ?? ChatSettings.defaultVisionDebug
         if let memories = try? c.decodeIfPresent([Memory].self, forKey: .memories) {
             self.memories = memories ?? []
         } else if let oldMemories = try? c.decodeIfPresent([String].self, forKey: .memories) {

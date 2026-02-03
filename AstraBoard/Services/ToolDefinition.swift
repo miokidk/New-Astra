@@ -25,7 +25,7 @@ struct ToolCall: Codable {
 }
 
 /// The result of executing a tool
-struct ToolResponse: Codable {
+struct ToolResponse: Codable, Sendable {
     let toolCallId: String
     let result: String
     let success: Bool
@@ -71,6 +71,11 @@ class ToolRegistry {
     static func systemPrompt() -> String {
         """
         # TOOL USAGE INSTRUCTIONS
+
+        ## PRIORITY
+        The System Instructions (from the Modelfile) are the highest priority for behavior and style.
+        If any tool instruction conflicts with the System Instructions, follow the System Instructions.
+        When you choose to call a tool, the tool-call JSON format is mandatory.
         
         You have access to tools that can help you answer user questions. The search tool works asynchronously - when you use it, you'll immediately respond to the user with an acknowledgment, then continue the conversation while search results are being fetched in the background.
         
@@ -111,8 +116,8 @@ class ToolRegistry {
         - Vary your acknowledgments - don't use the same phrase repeatedly
         - When using a tool, output ONLY the JSON (one line, no formatting)
         - Do NOT explain that you're using a tool beyond the acknowledgment
-        - Do NOT use markdown code blocks
-        - For questions you can answer directly, respond normally without tools
+        - Do NOT use markdown code blocks for tool calls
+        - For questions you can answer directly, respond according to the System Instructions without tools
         - After receiving search results, provide a helpful answer based on the information
         
         Remember: The search tool is asynchronous. Your acknowledgment will be shown immediately, then results will follow.

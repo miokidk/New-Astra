@@ -690,6 +690,7 @@ struct FloatingPanelHostView: View {
             panelView(for: .memories)
             panelView(for: .shapeStyle)
             panelView(for: .settings)
+            panelView(for: .systemInstructions)
             panelView(for: .reminder)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -757,6 +758,16 @@ struct FloatingPanelHostView: View {
                     store.togglePanel(.settings)
                 }, isResizable: false) {
                     SettingsPanelView()
+                }
+            }
+        case .systemInstructions:
+            if store.doc.ui.panels.systemInstructions.isOpen {
+                FloatingPanelView(panelKind: .systemInstructions, title: "System Instructions", box: store.doc.ui.panels.systemInstructions, onUpdate: { frame in
+                    store.updatePanel(.systemInstructions, frame: frame)
+                }, onClose: {
+                    store.togglePanel(.systemInstructions)
+                }) {
+                    SystemInstructionsPanelView()
                 }
             }
         case .reminder:
@@ -1231,7 +1242,7 @@ private struct ChatDockedPanelView: View {
     }
 
     private var headerRow: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     store.togglePanel(.chat)
@@ -1239,8 +1250,10 @@ private struct ChatDockedPanelView: View {
             }) {
                 Image(systemName: isCollapsed ? "chevron.up" : "chevron.down")
                     .font(.system(size: 12, weight: .semibold))
+                    .padding(6)
             }
             .buttonStyle(.plain)
+            .contentShape(Rectangle())
             .foregroundColor(headerIconColor)
             .help(isCollapsed ? "Expand chat" : "Collapse chat")
 
@@ -1308,7 +1321,7 @@ private struct ChatDockedPanelView: View {
 
             VStack(spacing: 0) {
                 headerRow
-                    .frame(height: Layout.headerHeight)
+                    .frame(height: Layout.headerHeight, alignment: .top)
 
                 if !isCollapsed {
                     Divider()
@@ -3131,6 +3144,24 @@ private struct ChatMessageRow: View {
                            height: maxSide + CGFloat(max(0, message.images.count - 1)) * 12,
                            alignment: .topLeading)
                 }
+                if store.doc.chatSettings.visionDebug,
+                   message.role == .user,
+                   let visionResult = message.toolResults?.first(where: { $0.toolCallId.hasPrefix("vision_") }) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Vision JSON")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        Text(visionResult.result)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                    )
+                }
                 if !message.files.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(message.files, id: \.self) { fileRef in
@@ -4137,6 +4168,12 @@ struct SettingsPanelView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
+            Toggle("Vision Debug", isOn: visionDebugBinding)
+                .toggleStyle(.switch)
+            Text("Shows raw vision JSON attached to chat messages.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Divider()
 
             Text("HUD")
@@ -4226,6 +4263,14 @@ struct SettingsPanelView: View {
         })
     }
 
+    private var visionDebugBinding: Binding<Bool> {
+        Binding(get: {
+            store.doc.chatSettings.visionDebug
+        }, set: { newValue in
+            store.updateChatSettings { $0.visionDebug = newValue }
+        })
+    }
+
     private func openHUDColorPanel() {
         let panel = NSColorPanel.shared
         panel.showsAlpha = true
@@ -4251,6 +4296,89 @@ struct SettingsPanelView: View {
         if let observer = hudColorObserver {
             NotificationCenter.default.removeObserver(observer)
             hudColorObserver = nil
+        }
+    }
+}
+
+struct SystemInstructionsPanelView: View {
+    @EnvironmentObject var store: BoardStore
+
+    private var hasChanges: Bool {
+        store.systemInstructionsDraft != store.systemInstructionsLastLoaded
+    }
+
+    private var canApply: Bool {
+        let trimmed = store.systemInstructionsDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && !store.isSystemInstructionsBusy
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Modelfile")
+                .font(.headline)
+            Text(store.modelfileURL.path)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: $store.systemInstructionsDraft)
+                    .font(.system(.body, design: .monospaced))
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                    )
+                if store.systemInstructionsDraft.isEmpty {
+                    Text("System instructions will appear here.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.top, 14)
+                        .padding(.leading, 12)
+                }
+            }
+            .frame(minHeight: 220)
+
+            HStack(spacing: 8) {
+                Button("Reload") {
+                    store.loadSystemInstructionsIfNeeded(force: true)
+                }
+                .buttonStyle(.bordered)
+                .disabled(store.isSystemInstructionsBusy)
+
+                Spacer()
+
+                if store.isSystemInstructionsBusy {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                }
+
+                Button("Save + Rebuild") {
+                    store.applySystemInstructionsAndRebuild()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canApply)
+            }
+
+            if hasChanges {
+                Text("Unsaved changes.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let status = store.systemInstructionsStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onAppear {
+            store.loadSystemInstructionsIfNeeded()
         }
     }
 }

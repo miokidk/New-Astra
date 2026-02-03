@@ -292,6 +292,7 @@ struct ChatMsg: Codable, Identifiable {
     var text: String
     var images: [ImageRef]
     var files: [FileRef]
+    var toolResults: [ToolResponse]?
     var ts: Double
 
     private enum CodingKeys: String, CodingKey {
@@ -302,14 +303,22 @@ struct ChatMsg: Codable, Identifiable {
         case images
         case ts
         case files
+        case toolResults
     }
 
-    init(id: UUID, role: Actor, text: String, images: [ImageRef], files: [FileRef], ts: Double) {
+    init(id: UUID,
+         role: Actor,
+         text: String,
+         images: [ImageRef],
+         files: [FileRef],
+         toolResults: [ToolResponse]? = nil,
+         ts: Double) {
         self.id = id
         self.role = role
         self.text = text
         self.images = images
         self.files = files
+        self.toolResults = toolResults
         self.ts = ts
     }
 
@@ -327,6 +336,7 @@ struct ChatMsg: Codable, Identifiable {
             self.images = []
         }
         files = try container.decodeIfPresent([FileRef].self, forKey: .files) ?? []
+        toolResults = try container.decodeIfPresent([ToolResponse].self, forKey: .toolResults)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -341,6 +351,9 @@ struct ChatMsg: Codable, Identifiable {
         if !files.isEmpty {
             try container.encode(files, forKey: .files)
         }
+        if let toolResults, !toolResults.isEmpty {
+            try container.encode(toolResults, forKey: .toolResults)
+        }
     }
 }
 
@@ -348,15 +361,23 @@ struct ChatThread: Codable {
     var id: UUID
     var messages: [ChatMsg]
     var title: String?
+    var contextSummaries: [String]
+    var summarizedMessageCount: Int
 
     private enum CodingKeys: String, CodingKey {
-        case id, messages, title
+        case id, messages, title, contextSummaries, summarizedMessageCount
     }
 
-    init(id: UUID, messages: [ChatMsg], title: String? = nil) {
+    init(id: UUID,
+         messages: [ChatMsg],
+         title: String? = nil,
+         contextSummaries: [String] = [],
+         summarizedMessageCount: Int = 0) {
         self.id = id
         self.messages = messages
         self.title = title
+        self.contextSummaries = contextSummaries
+        self.summarizedMessageCount = summarizedMessageCount
     }
 
     init(from decoder: Decoder) throws {
@@ -364,12 +385,28 @@ struct ChatThread: Codable {
         id = try container.decode(UUID.self, forKey: .id)
         messages = try container.decode([ChatMsg].self, forKey: .messages)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        contextSummaries = try container.decodeIfPresent([String].self, forKey: .contextSummaries) ?? []
+        summarizedMessageCount = try container.decodeIfPresent(Int.self, forKey: .summarizedMessageCount) ?? 0
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(messages, forKey: .messages)
+        try container.encode(title, forKey: .title)
+        if !contextSummaries.isEmpty {
+            try container.encode(contextSummaries, forKey: .contextSummaries)
+        }
+        if summarizedMessageCount != 0 {
+            try container.encode(summarizedMessageCount, forKey: .summarizedMessageCount)
+        }
     }
 }
 
 struct ChatSettings: Codable {
     static let defaultVoice = "nova"
     static let defaultAlwaysListening = false
+    static let defaultVisionDebug = false
     static let availableVoices = [
         "alloy",
         "ash",
@@ -387,22 +424,26 @@ struct ChatSettings: Codable {
     var notes: String
     var voice: String
     var alwaysListening: Bool
+    var visionDebug: Bool
 
     private enum CodingKeys: String, CodingKey {
         case userName
         case notes
         case voice
         case alwaysListening
+        case visionDebug
     }
 
     init(userName: String,
          notes: String,
          voice: String = ChatSettings.defaultVoice,
-         alwaysListening: Bool = ChatSettings.defaultAlwaysListening) {
+         alwaysListening: Bool = ChatSettings.defaultAlwaysListening,
+         visionDebug: Bool = ChatSettings.defaultVisionDebug) {
         self.userName = userName
         self.notes = notes
         self.voice = ChatSettings.availableVoices.contains(voice) ? voice : ChatSettings.defaultVoice
         self.alwaysListening = alwaysListening
+        self.visionDebug = visionDebug
     }
 
     init(from decoder: Decoder) throws {
@@ -416,6 +457,7 @@ struct ChatSettings: Codable {
         let rawVoice = try container.decodeIfPresent(String.self, forKey: .voice) ?? Self.defaultVoice
         voice = Self.availableVoices.contains(rawVoice) ? rawVoice : Self.defaultVoice
         alwaysListening = try container.decodeIfPresent(Bool.self, forKey: .alwaysListening) ?? Self.defaultAlwaysListening
+        visionDebug = try container.decodeIfPresent(Bool.self, forKey: .visionDebug) ?? Self.defaultVisionDebug
     }
 
     func encode(to encoder: Encoder) throws {
@@ -424,6 +466,7 @@ struct ChatSettings: Codable {
         try container.encode(notes, forKey: .notes)
         try container.encode(voice, forKey: .voice)
         try container.encode(alwaysListening, forKey: .alwaysListening)
+        try container.encode(visionDebug, forKey: .visionDebug)
     }
 
     private enum LegacyCodingKeys: String, CodingKey {
@@ -615,6 +658,7 @@ struct PanelsState: Codable {
     var memories: PanelBox
     var shapeStyle: PanelBox
     var settings: PanelBox
+    var systemInstructions: PanelBox
     var reminder: PanelBox
 
     private enum CodingKeys: String, CodingKey {
@@ -624,6 +668,7 @@ struct PanelsState: Codable {
         case memories
         case shapeStyle
         case settings
+        case systemInstructions
         case reminder
     }
 
@@ -634,6 +679,7 @@ struct PanelsState: Codable {
         memories: PanelBox,
         shapeStyle: PanelBox,
         settings: PanelBox,
+        systemInstructions: PanelBox,
         reminder: PanelBox
     ) {
         self.chat = chat
@@ -642,6 +688,7 @@ struct PanelsState: Codable {
         self.memories = memories
         self.shapeStyle = shapeStyle
         self.settings = settings
+        self.systemInstructions = systemInstructions
         self.reminder = reminder
     }
 
@@ -659,6 +706,8 @@ struct PanelsState: Codable {
             ?? PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320)
         settings = try container.decodeIfPresent(PanelBox.self, forKey: .settings)
             ?? PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520)
+        systemInstructions = try container.decodeIfPresent(PanelBox.self, forKey: .systemInstructions)
+            ?? PanelBox(isOpen: false, x: 520, y: 120, w: 520, h: 420)
         reminder = try container.decodeIfPresent(PanelBox.self, forKey: .reminder) // Decode new property
             ?? PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Default value for reminder panel
     }
@@ -1227,6 +1276,7 @@ extension BoardDoc {
             memories: PanelBox(isOpen: false, x: 300, y: 200, w: 420, h: 520),
             shapeStyle: PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320),
             settings: PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520),
+            systemInstructions: PanelBox(isOpen: false, x: 520, y: 120, w: 520, h: 420),
             reminder: PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Initialize new reminder panel
         )
         return BoardDoc(
@@ -1237,7 +1287,7 @@ extension BoardDoc {
             viewport: Viewport(offsetX: 0, offsetY: 0, zoom: 1.0),
             entries: [:],
             zOrder: [],
-            chat: ChatThread(id: UUID(), messages: []),
+            chat: ChatThread(id: UUID(), messages: [], contextSummaries: [], summarizedMessageCount: 0),
             chatSettings: ChatSettings.defaultSettings,
             chatHistory: [],
             pendingClarification: nil,
