@@ -130,6 +130,7 @@ struct HUDView: View {
     private let voiceSilenceTimeout: TimeInterval = 2.0
     private let chatPanelSpacing: CGFloat = 4
     private let chatPanelOverlap: CGFloat = 18
+    private var chatPanelHorizontalInset: CGFloat { baseInputHeight / 2 }
 
     private var bubbleColor: Color {
         Color(NSColor.controlBackgroundColor).opacity(colorScheme == .dark ? 0.65 : 0.42)
@@ -161,7 +162,7 @@ struct HUDView: View {
                                     onHeightChange: { height in
                                         chatPanelHeight = height
                                     })
-                    .frame(width: size.width)
+                    .frame(width: max(0, size.width - chatPanelHorizontalInset * 2))
                     .padding(.bottom, panelBottomPadding(for: size.height))
                 hudBar(size: size)
             }
