@@ -19,7 +19,7 @@ private let textEntryChunkMaxLength = 2000
 private let textEntryChunkSpacing: CGFloat = 16
 
 enum PanelKind {
-    case chat, chatArchive, log, memories, shapeStyle, settings, notes, reminder
+    case chat, chatArchive, log, memories, shapeStyle, settings, reminder
 
     static let defaultZOrder: [PanelKind] = [
         .chat,
@@ -28,7 +28,6 @@ enum PanelKind {
         .memories,
         .shapeStyle,
         .settings,
-        .notes,
         .reminder
     ]
 }
@@ -1751,23 +1750,20 @@ extension BoardStore {
                              width: width,
                              height: height)
         } else if case .line = entry.data {
-            let minSize = linePadding * 2
             clamped = CGRect(x: rect.origin.x,
                              y: rect.origin.y,
-                             width: max(rect.size.width, minSize),
-                             height: max(rect.size.height, minSize))
+                             width: rect.size.width,
+                             height: rect.size.height)
         } else if case .file = entry.data {
-            let minSize = CGSize(width: 160, height: 90)
             clamped = CGRect(x: rect.origin.x,
                              y: rect.origin.y,
-                             width: max(rect.size.width, minSize.width),
-                             height: max(rect.size.height, minSize.height))
+                             width: rect.size.width,
+                             height: rect.size.height)
         } else {
-            let minSize = CGSize(width: 80, height: 60)
             clamped = CGRect(x: rect.origin.x,
                              y: rect.origin.y,
-                             width: max(rect.size.width, minSize.width),
-                             height: max(rect.size.height, minSize.height))
+                             width: rect.size.width,
+                             height: rect.size.height)
         }
         entry.x = clamped.origin.x.double
         entry.y = clamped.origin.y.double
@@ -2890,8 +2886,6 @@ extension BoardStore {
             doc.ui.panels.shapeStyle.isOpen.toggle()
         case .settings:
             doc.ui.panels.settings.isOpen.toggle()
-        case .notes:
-            doc.ui.panels.notes.isOpen.toggle()
         case .reminder: // Handle new reminder case
             doc.ui.panels.reminder.isOpen.toggle()
         }
@@ -2933,11 +2927,6 @@ extension BoardStore {
             doc.ui.panels.settings.y = clamped.origin.y.double
             doc.ui.panels.settings.w = clamped.size.width.double
             doc.ui.panels.settings.h = clamped.size.height.double
-        case .notes:
-            doc.ui.panels.notes.x = clamped.origin.x.double
-            doc.ui.panels.notes.y = clamped.origin.y.double
-            doc.ui.panels.notes.w = clamped.size.width.double
-            doc.ui.panels.notes.h = clamped.size.height.double
         case .reminder: // Handle new reminder case
             doc.ui.panels.reminder.x = clamped.origin.x.double
             doc.ui.panels.reminder.y = clamped.origin.y.double
@@ -2961,8 +2950,6 @@ extension BoardStore {
             isOpen = doc.ui.panels.shapeStyle.isOpen
         case .settings:
             isOpen = doc.ui.panels.settings.isOpen
-        case .notes:
-            isOpen = doc.ui.panels.notes.isOpen
         case .reminder:
             isOpen = doc.ui.panels.reminder.isOpen
         }
@@ -2992,8 +2979,6 @@ extension BoardStore {
             box = doc.ui.panels.shapeStyle
         case .settings:
             box = doc.ui.panels.settings
-        case .notes:
-            box = doc.ui.panels.notes
         case .reminder:
             box = doc.ui.panels.reminder
         }
@@ -3019,8 +3004,6 @@ extension BoardStore {
             doc.ui.panels.shapeStyle = updated
         case .settings:
             doc.ui.panels.settings = updated
-        case .notes:
-            doc.ui.panels.notes = updated
         case .reminder:
             doc.ui.panels.reminder = updated
         }
@@ -3254,10 +3237,6 @@ extension BoardStore {
         touch()
         queuedUserMessageIDs.append(userMessage.id)
 
-        if !doc.ui.panels.chat.isOpen {
-            chatNeedsAttention = true
-        }
-
         startChatReplyIfIdle()
 
         if voiceInput {
@@ -3458,6 +3437,9 @@ extension BoardStore {
         // Don't reset chatThinkingExpanded - preserve user's choice
         if !canceled {
             chatWarning = nil
+            if !doc.ui.panels.chat.isOpen {
+                chatNeedsAttention = true
+            }
         }
         chatReplyTask = nil
         startChatReplyIfIdle()
@@ -3477,6 +3459,9 @@ extension BoardStore {
         }
         chatWarning = "Chat error: \(message)"
         updateChatMessageText(id: assistantMessageID, text: "Error: \(message)")
+        if !doc.ui.panels.chat.isOpen {
+            chatNeedsAttention = true
+        }
         chatReplyTask = nil
         startChatReplyIfIdle()
     }

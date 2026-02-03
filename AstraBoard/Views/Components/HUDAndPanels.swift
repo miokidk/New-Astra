@@ -100,7 +100,9 @@ private struct FindBarView: View {
             .onChange(of: isVisible) { v in
                 if v { DispatchQueue.main.async { fieldFocused = true } }
             }
+#if os(macOS)
             .onExitCommand { onClose() }
+#endif
         }
     }
 }
@@ -114,6 +116,7 @@ struct HUDView: View {
     
     @State private var dragOffset: CGSize = .zero
     @State private var inputHeight: CGFloat = 56
+    @State private var chatPanelHeight: CGFloat = ChatDockedPanelView.collapsedHeight()
     @State private var isMultiLineInput = false
     @State private var textFieldKey: UUID = UUID() // Add this to force refresh
     @State private var suppressToggleAfterDrag = false
@@ -125,6 +128,8 @@ struct HUDView: View {
     private let baseInputHeight: CGFloat = 56
     private let inputVerticalPadding: CGFloat = 20
     private let voiceSilenceTimeout: TimeInterval = 2.0
+    private let chatPanelSpacing: CGFloat = 4
+    private let chatPanelOverlap: CGFloat = 18
 
     private var bubbleColor: Color {
         Color(NSColor.controlBackgroundColor).opacity(colorScheme == .dark ? 0.65 : 0.42)
@@ -148,42 +153,41 @@ struct HUDView: View {
     var body: some View {
         if store.doc.ui.hud.isVisible {
             let size = hudSize()
-            Capsule()
-                .fill(barColor)
-                .shadow(color: hudShadowColor, radius: 10, x: 0, y: 8)
-                .frame(width: size.width, height: size.height)
-                .overlay(alignment: .center) {
-                    HStack(alignment: .center, spacing: 6) {
-                        hudButton(symbol: "xmark") { store.toggleHUD() }
-
-                        hudButton(symbol: "bubble.left.fill",
-                                  isActive: store.doc.ui.panels.chat.isOpen,
-                                  isPulsing: !store.doc.ui.panels.chat.isOpen && store.pendingChatReplies > 0,
-                                  showsBadge: !store.doc.ui.panels.chat.isOpen && store.chatNeedsAttention) {
-                            store.togglePanel(.chat)
-                        }
-
-                        inputFieldContainer
-                            .id(textFieldKey) // Add key to force recreation
-                        if !store.chatDraftImages.isEmpty || !store.chatDraftFiles.isEmpty {
-                            hudAttachmentStack
-                        }
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 10)
-                }
-            .foregroundColor(iconColor)
+            ZStack(alignment: .bottom) {
+                ChatDockedPanelView(isCollapsed: !store.doc.ui.panels.chat.isOpen,
+                                    chatInput: $chatInput,
+                                    onSend: onSend,
+                                    maxHeight: chatPanelMaxHeight,
+                                    onHeightChange: { height in
+                                        chatPanelHeight = height
+                                    })
+                    .frame(width: size.width)
+                    .padding(.bottom, panelBottomPadding(for: size.height))
+                hudBar(size: size)
+            }
+            .frame(width: size.width)
             .offset(x: store.doc.ui.hud.x.cg + dragOffset.width,
-                    y: hudOffsetY)
-            .simultaneousGesture(hudDragGesture())
+                    y: hudStackOffsetY)
+            .onChange(of: store.doc.ui.panels.chat.isOpen) { isOpen in
+                // Ensure the bar stays anchored during expand/collapse even before the panel reports its height.
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    chatPanelHeight = isOpen
+                        ? ChatDockedPanelView.expandedMinimumHeight(maxHeight: chatPanelMaxHeight)
+                        : ChatDockedPanelView.collapsedHeight()
+                }
+                updateHudExtraHeight()
+            }
             .onChange(of: chatInput) { newValue in
                 let isEmpty = newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 if isEmpty {
                     inputHeight = baseInputHeight
-                    store.hudExtraHeight = 0
                     isMultiLineInput = false
                     textFieldKey = UUID() // Force text field to recreate
+                    updateHudExtraHeight()
                 }
+            }
+            .onChange(of: inputHeight) { _ in
+                updateHudExtraHeight()
             }
             .onChange(of: voiceInput.transcript) { newValue in
                 guard voiceInput.isRecording else { return }
@@ -203,16 +207,14 @@ struct HUDView: View {
             }
             .onAppear {
                 handlePendingWakeWord()
+                // Keep the bar anchored if the chat panel is persisted open.
+                chatPanelHeight = store.doc.ui.panels.chat.isOpen
+                    ? ChatDockedPanelView.expandedMinimumHeight(maxHeight: chatPanelMaxHeight)
+                    : ChatDockedPanelView.collapsedHeight()
+                updateHudExtraHeight()
             }
             .onChange(of: appModel.pendingWakeWord) { _ in
                 handlePendingWakeWord()
-            }
-            .onChange(of: inputHeight) { newHeight in
-                let isEmpty = chatInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                if !isEmpty {
-                    let extra = max(0, newHeight - baseInputHeight)
-                    store.hudExtraHeight = extra
-                }
             }
         } else {
             // Collapsed HUD: show a draggable button at the HUD's last position.
@@ -251,6 +253,28 @@ struct HUDView: View {
                       activeBorder: activeBorder,
                       pulseBorder: pulseBorder,
                       action: action)
+    }
+
+    private func hudBar(size: CGSize) -> some View {
+        Capsule()
+            .fill(barColor)
+            .shadow(color: hudShadowColor, radius: 10, x: 0, y: 8)
+            .frame(width: size.width, height: size.height)
+            .overlay(alignment: .center) {
+                HStack(alignment: .center, spacing: 6) {
+                    hudButton(symbol: "xmark") { store.toggleHUD() }
+
+                    inputFieldContainer
+                        .id(textFieldKey) // Add key to force recreation
+                    if !store.chatDraftImages.isEmpty || !store.chatDraftFiles.isEmpty {
+                        hudAttachmentStack
+                    }
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+            }
+            .foregroundColor(iconColor)
+            .simultaneousGesture(hudDragGesture())
     }
 
     private var inputField: some View {
@@ -412,6 +436,36 @@ struct HUDView: View {
         BoardStore.hudSize
     }
 
+    private var chatPanelMaxHeight: CGFloat {
+        let fallback: CGFloat = 360
+        guard store.viewportSize.height > 0 else { return fallback }
+        let viewportCap = min(fallback, max(200, store.viewportSize.height * 0.45))
+        return viewportCap
+    }
+
+    private var inputExtraHeight: CGFloat {
+        max(0, inputHeight - baseInputHeight)
+    }
+
+    private func updateHudExtraHeight() {
+        let next = inputExtraHeight
+        if abs(store.hudExtraHeight - next) > 0.5 {
+            store.hudExtraHeight = next
+        }
+    }
+
+    private var panelAboveBar: CGFloat {
+        max(0, chatPanelHeight - actualChatPanelOverlap)
+    }
+
+    private func panelBottomPadding(for barHeight: CGFloat) -> CGFloat {
+        max(0, barHeight - actualChatPanelOverlap)
+    }
+
+    private var actualChatPanelOverlap: CGFloat {
+        max(0, chatPanelOverlap - chatPanelSpacing)
+    }
+
     private var hudInputFont: NSFont {
         let base = NSFont.systemFont(ofSize: 22, weight: .medium)
         if let descriptor = base.fontDescriptor.withDesign(.rounded),
@@ -438,6 +492,10 @@ struct HUDView: View {
         }
         let minY = max(0, store.hudExtraHeight)
         return max(baseY, minY)
+    }
+
+    private var hudStackOffsetY: CGFloat {
+        hudOffsetY - panelAboveBar
     }
 
     private var hasChatInputText: Bool {
@@ -645,13 +703,11 @@ struct FloatingPanelHostView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            panelView(for: .chat)
             panelView(for: .chatArchive)
             panelView(for: .log)
             panelView(for: .memories)
             panelView(for: .shapeStyle)
             panelView(for: .settings)
-            panelView(for: .notes)
             panelView(for: .reminder)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -717,18 +773,8 @@ struct FloatingPanelHostView: View {
                     store.updatePanel(.settings, frame: frame)
                 }, onClose: {
                     store.togglePanel(.settings)
-                }) {
+                }, isResizable: false) {
                     SettingsPanelView()
-                }
-            }
-        case .notes:
-            if store.doc.ui.panels.notes.isOpen {
-                FloatingPanelView(panelKind: .notes, title: "Notes", box: store.doc.ui.panels.notes, onUpdate: { frame in
-                    store.updatePanel(.notes, frame: frame)
-                }, onClose: {
-                    store.togglePanel(.notes)
-                }) {
-                    NotesPanelView()
                 }
             }
         case .reminder:
@@ -745,6 +791,7 @@ struct FloatingPanelView<Content: View>: View {
     var box: PanelBox
     var onUpdate: (CGRect) -> Void
     var onClose: () -> Void
+    var isResizable: Bool = true
     @ViewBuilder var content: Content
     private var headerBackground: Color {
         Color(NSColor.windowBackgroundColor).opacity(colorScheme == .dark ? 0.85 : 0.7)
@@ -809,14 +856,16 @@ struct FloatingPanelView<Content: View>: View {
                 .shadow(color: panelShadow, radius: 10, x: 0, y: 4)
         )
         .overlay(alignment: .topLeading) {
-            PanelResizeHandles(
-                frame: frame,
-                minSize: minSize,
-                panelKind: panelKind,
-                onUpdate: onUpdate
-            )
-            .frame(width: frame.width, height: frame.height)
-            .clipped()
+            if isResizable {
+                PanelResizeHandles(
+                    frame: frame,
+                    minSize: minSize,
+                    panelKind: panelKind,
+                    onUpdate: onUpdate
+                )
+                .frame(width: frame.width, height: frame.height)
+                .clipped()
+            }
         }
         .offset(x: frame.minX, y: frame.minY)
     }
@@ -930,6 +979,424 @@ private struct ChatScrollObserver: NSViewRepresentable {
             if let frameObserver {
                 NotificationCenter.default.removeObserver(frameObserver)
             }
+        }
+    }
+}
+
+private struct ChatDockedPanelView: View {
+    @EnvironmentObject var store: BoardStore
+    @Environment(\.colorScheme) private var colorScheme
+    let isCollapsed: Bool
+    @Binding var chatInput: String
+    var onSend: (Bool) -> Void
+    let maxHeight: CGFloat
+    var onHeightChange: ((CGFloat) -> Void)? = nil
+
+    @State private var scrollState = ChatScrollState()
+    @State private var contentHeight: CGFloat = 0
+    @State private var lastReportedHeight: CGFloat = 0
+    @FocusState private var panelFocused: Bool
+
+    @State private var isFindVisible: Bool = false
+    @State private var findQuery: String = ""
+    @State private var findMatches: [UUID] = []
+    @State private var findIndex: Int = 0
+    @State private var pendingFindCommand: FindCommand?
+
+    private enum Layout {
+        static let cornerRadius: CGFloat = 18
+        static let contentPadding: CGFloat = 12
+        static let headerHeight: CGFloat = 30
+        static let dividerHeight: CGFloat = 1
+        static let pinThreshold: CGFloat = 12
+        static let minContentHeight: CGFloat = 140
+    }
+
+    static func collapsedHeight() -> CGFloat {
+        Layout.headerHeight + Layout.contentPadding * 2
+    }
+
+    static func expandedMinimumHeight(maxHeight: CGFloat) -> CGFloat {
+        Layout.headerHeight + Layout.dividerHeight + min(maxHeight, Layout.minContentHeight) + Layout.contentPadding * 2
+    }
+
+    private var panelBackground: Color {
+        Color(NSColor.windowBackgroundColor).opacity(colorScheme == .dark ? 0.92 : 0.9)
+    }
+
+    private var panelBorder: Color {
+        Color(NSColor.separatorColor).opacity(colorScheme == .dark ? 0.7 : 0.55)
+    }
+
+    private var panelShadow: Color {
+        Color.black.opacity(colorScheme == .dark ? 0.45 : 0.12)
+    }
+
+    private var headerIconColor: Color {
+        Color(NSColor.secondaryLabelColor)
+    }
+
+    private var scrollHeight: CGFloat {
+        min(maxHeight, max(contentHeight, Layout.minContentHeight))
+    }
+
+    private var totalPanelHeight: CGFloat {
+        if isCollapsed {
+            return Self.collapsedHeight()
+        }
+        return Layout.headerHeight + Layout.dividerHeight + scrollHeight + Layout.contentPadding * 2
+    }
+
+    private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
+        scrollState.autoScrollWorkItem?.cancel()
+
+        let item = DispatchWorkItem {
+            if animated {
+                withAnimation(.easeOut(duration: 0.18)) {
+                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                }
+            } else {
+                var txn = Transaction()
+                txn.disablesAnimations = true
+                withTransaction(txn) {
+                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                }
+            }
+        }
+
+        scrollState.autoScrollWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
+    }
+
+    private enum FindCommand: Equatable {
+        case open
+        case next
+        case prev
+        case close
+    }
+
+    private func updatePinnedState(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        scrollState.scrollView = scrollView
+        let docHeight = docView.bounds.height
+        if abs(contentHeight - docHeight) > 0.5 {
+            contentHeight = docHeight
+        }
+        if scrollState.lastContentHeight <= 0 {
+            scrollState.lastContentHeight = docHeight
+        }
+        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
+        let currentOffset = scrollView.contentView.bounds.origin.y
+        let distanceFromBottom: CGFloat
+        if docView.isFlipped {
+            distanceFromBottom = max(0, maxOffset - currentOffset)
+        } else {
+            distanceFromBottom = max(0, currentOffset)
+        }
+        let pinnedNow = distanceFromBottom <= Layout.pinThreshold
+        if pinnedNow != scrollState.isPinnedToBottom {
+            scrollState.isPinnedToBottom = pinnedNow
+            if !pinnedNow {
+                scrollState.autoScrollWorkItem?.cancel()
+            }
+        }
+    }
+
+    private func scrollToBottom(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
+        let targetOffset = docView.isFlipped ? maxOffset : 0
+        let currentOffset = scrollView.contentView.bounds.origin.y
+        if abs(currentOffset - targetOffset) > 0.5 {
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        }
+    }
+
+    private func handleContentSizeChange(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        scrollState.scrollView = scrollView
+        let newHeight = docView.bounds.height
+        let oldHeight = scrollState.lastContentHeight
+        scrollState.lastContentHeight = newHeight
+        if abs(contentHeight - newHeight) > 0.5 {
+            contentHeight = newHeight
+        }
+
+        guard scrollState.isPinnedToBottom else { return }
+        guard oldHeight > 0 else {
+            scrollToBottom(using: scrollView)
+            return
+        }
+
+        if docView.isFlipped {
+            let delta = newHeight - oldHeight
+            if abs(delta) > 0.5 {
+                let maxOffset = max(0, newHeight - scrollView.contentView.bounds.height)
+                let currentOffset = scrollView.contentView.bounds.origin.y
+                let targetOffset = min(max(0, currentOffset + delta), maxOffset)
+                if abs(currentOffset - targetOffset) > 0.5 {
+                    scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetOffset))
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+                }
+            }
+        } else {
+            scrollToBottom(using: scrollView)
+        }
+    }
+
+    private var warningView: some View {
+        Group {
+            if let warning = store.chatWarning {
+                Text(warning)
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .cornerRadius(6)
+            }
+        }
+    }
+
+    private func rebuildFindMatches() {
+        let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else {
+            findMatches = []
+            findIndex = 0
+            return
+        }
+
+        let ids = store.doc.chat.messages
+            .filter { $0.text.localizedCaseInsensitiveContains(q) }
+            .map { $0.id }
+
+        findMatches = ids
+        if findIndex >= ids.count { findIndex = 0 }
+    }
+
+    private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
+        guard isFindVisible, !findMatches.isEmpty else { return }
+        let id = findMatches[findIndex]
+        withAnimation(.easeInOut(duration: 0.18)) {
+            proxy.scrollTo(id, anchor: .center)
+        }
+    }
+
+    private func applyFindCommand(_ cmd: FindCommand, proxy: ScrollViewProxy) {
+        switch cmd {
+        case .open:
+            isFindVisible = true
+            rebuildFindMatches()
+            scrollToCurrentMatch(proxy: proxy)
+        case .next:
+            if !isFindVisible { isFindVisible = true }
+            rebuildFindMatches()
+            guard !findMatches.isEmpty else { return }
+            findIndex = (findIndex + 1) % findMatches.count
+            scrollToCurrentMatch(proxy: proxy)
+        case .prev:
+            if !isFindVisible { isFindVisible = true }
+            rebuildFindMatches()
+            guard !findMatches.isEmpty else { return }
+            findIndex = (findIndex - 1 + findMatches.count) % findMatches.count
+            scrollToCurrentMatch(proxy: proxy)
+        case .close:
+            isFindVisible = false
+        }
+    }
+
+    private var canStartNewChat: Bool {
+        !store.doc.chat.messages.isEmpty || store.chatWarning != nil
+    }
+
+    private var findTarget: FindTarget {
+        FindTarget(
+            presentFind: { pendingFindCommand = .open },
+            findNext: { pendingFindCommand = .next },
+            findPrev: { pendingFindCommand = .prev },
+            closeFind: { pendingFindCommand = .close }
+        )
+    }
+
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    store.togglePanel(.chat)
+                }
+            }) {
+                Image(systemName: isCollapsed ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(headerIconColor)
+            .help(isCollapsed ? "Expand chat" : "Collapse chat")
+
+            if store.pendingChatReplies > 0 {
+                headerIconButton(symbol: "stop.fill", help: "Stop response") {
+                    store.stopChatReplies()
+                }
+            }
+            if store.isSpeaking {
+                headerIconButton(symbol: "speaker.slash.fill", help: "Stop voice") {
+                    store.stopSpeechPlayback()
+                }
+            }
+
+            Spacer()
+
+            Button("New Chat") {
+                store.startNewChat()
+                chatInput = ""
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 14, weight: .semibold))
+            .foregroundColor(headerIconColor)
+            .disabled(!canStartNewChat)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func headerIconButton(symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .padding(4)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(headerIconColor)
+        .help(help)
+    }
+
+    var body: some View {
+        let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let matchSummary: String = {
+            if q.isEmpty { return "Type to search" }
+            if findMatches.isEmpty { return "No matches" }
+            return "\(findIndex + 1) of \(findMatches.count)"
+        }()
+
+        ZStack {
+            RoundedRectangle(cornerRadius: Layout.cornerRadius)
+                .fill(panelBackground)
+            ChatPanelBackground()
+                .clipShape(RoundedRectangle(cornerRadius: Layout.cornerRadius))
+                .allowsHitTesting(false)
+
+            VStack(spacing: 0) {
+                headerRow
+                    .frame(height: Layout.headerHeight)
+
+                if !isCollapsed {
+                    Divider()
+
+                    ScrollViewReader { proxy in
+                        ZStack(alignment: .top) {
+                            ScrollView(showsIndicators: contentHeight > maxHeight) {
+                                VStack(alignment: .leading, spacing: 14) {
+                                    warningView
+
+                                    ForEach(Array(store.doc.chat.messages.enumerated()), id: \.element.id) { index, msg in
+                                        let canRetry = false
+                                        let canEdit = store.pendingChatReplies == 0 && msg.role == .user
+                                        let isStreamingAssistant = store.pendingChatReplies > 0 &&
+                                            index == store.doc.chat.messages.count - 1 &&
+                                            msg.role == .assistant
+                                        let isLastAssistant = index == store.doc.chat.messages.count - 1 && msg.role == .assistant
+                                        let activityText: String? = isStreamingAssistant ? store.chatActivityStatus : nil
+                                        let thinkingText: String? = isLastAssistant ? store.chatThinkingText : nil
+
+                                        ChatMessageRow(
+                                            message: msg,
+                                            showsRetry: canRetry,
+                                            onRetry: { store.retryChatReply(messageId: msg.id) },
+                                            showsEdit: canEdit,
+                                            activityText: activityText,
+                                            thinkingText: thinkingText,
+                                            thinkingExpanded: isLastAssistant ? store.chatThinkingExpanded : false,
+                                            onToggleThinking: { store.chatThinkingExpanded.toggle() }
+                                        )
+                                        .id(msg.id)
+                                    }
+
+                                    Color.clear
+                                        .frame(height: 1)
+                                        .id(ChatScrollAnchor.bottom)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 4)
+                                .background(
+                                    ChatScrollObserver(
+                                        onScroll: { scrollView in
+                                            updatePinnedState(using: scrollView)
+                                        },
+                                        onContentSizeChange: { scrollView in
+                                            handleContentSizeChange(using: scrollView)
+                                        }
+                                    )
+                                    .allowsHitTesting(false)
+                                )
+                            }
+
+                            FindBarView(
+                                isVisible: $isFindVisible,
+                                query: $findQuery,
+                                matchSummary: matchSummary,
+                                onNext: { pendingFindCommand = .next },
+                                onPrev: { pendingFindCommand = .prev },
+                                onClose: { pendingFindCommand = .close }
+                            )
+                            .padding(.horizontal, 6)
+                            .padding(.top, 4)
+                        }
+                        .frame(height: scrollHeight)
+                        .onAppear {
+                            DispatchQueue.main.async {
+                                scheduleScrollToBottom(proxy, animated: false)
+                            }
+                        }
+                        .onChange(of: findQuery) { _ in
+                            rebuildFindMatches()
+                        }
+                        .onChange(of: pendingFindCommand) { cmd in
+                            guard let cmd else { return }
+                            applyFindCommand(cmd, proxy: proxy)
+                            pendingFindCommand = nil
+                        }
+                    }
+                }
+            }
+            .padding(Layout.contentPadding)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: Layout.cornerRadius)
+                .stroke(panelBorder, lineWidth: 1)
+        )
+        .shadow(color: panelShadow, radius: 8, x: 0, y: 4)
+        .frame(height: totalPanelHeight)
+        .onAppear { reportHeight() }
+        .onChange(of: totalPanelHeight) { _ in reportHeight() }
+        .onChange(of: isCollapsed) { _ in
+            isFindVisible = false
+            reportHeight()
+        }
+        .contentShape(Rectangle())
+#if os(macOS)
+        .focusable(true)
+        .hidePanelFocusRing()
+        .focused($panelFocused)
+        .onTapGesture { panelFocused = true }
+        .onExitCommand { pendingFindCommand = .close }
+#endif
+    }
+
+    private func reportHeight() {
+        guard let onHeightChange else { return }
+        let height = totalPanelHeight
+        if abs(lastReportedHeight - height) > 0.5 {
+            lastReportedHeight = height
+            onHeightChange(height)
         }
     }
 }
@@ -1226,11 +1693,13 @@ struct ChatPanelView: View {
             .padding(12)
         }
         .contentShape(Rectangle())
+#if os(macOS)
         .focusable(true)
+        .hidePanelFocusRing()
         .focused($panelFocused)
         .onTapGesture { panelFocused = true }
-        .focusedValue(\.findTarget, panelFocused ? findTarget : nil)
         .onExitCommand { pendingFindCommand = .close }
+#endif
     }
 }
 
@@ -1384,13 +1853,59 @@ struct ChatArchivePanelView: View {
             .padding(12)
         }
         .contentShape(Rectangle())
+#if os(macOS)
         .focusable(true)
+        .hidePanelFocusRing()
         .focused($panelFocused)
         .onTapGesture { panelFocused = true }
-        .focusedValue(\.findTarget, panelFocused ? findTarget : nil)
         .onExitCommand { pendingFindCommand = .close }
+#endif
     }
 }
+
+#if os(macOS)
+private struct FocusRingDisabler: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            disableFocusRing(from: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            disableFocusRing(from: nsView)
+        }
+    }
+
+    private func disableFocusRing(from view: NSView) {
+        var current: NSView? = view
+        while let v = current {
+            v.focusRingType = .none
+            current = v.superview
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func hidePanelFocusRing() -> some View {
+        if #available(macOS 14, *) {
+            self
+                .focusEffectDisabled(true)
+                .background(FocusRingDisabler())
+        } else {
+            self.background(FocusRingDisabler())
+        }
+    }
+}
+#else
+private extension View {
+    func hidePanelFocusRing() -> some View { self }
+}
+#endif
+
 private struct ChatActivityStatusView: View {
     let text: String
     @State private var pulse = false
@@ -1753,7 +2268,6 @@ private struct ChatMarkdownTableView: View {
         .frame(width: width, alignment: frameAlignment(colAlign))
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
-        .frame(maxHeight: .infinity, alignment: frameAlignment(colAlign))
         .gridCellUnsizedAxes(.vertical)
         .background(isHeader ? headerBG : zebraBG)
         // Gridlines (draw bottom + trailing only; outer border comes from container)
@@ -3636,38 +4150,6 @@ struct SettingsPanelView: View {
     }
 }
 
-struct NotesPanelView: View {
-    @EnvironmentObject var store: BoardStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Notes")
-                .font(.headline)
-            ZStack(alignment: .topLeading) {
-                TextEditor(text: notesBinding)
-                    .frame(minHeight: 140)
-                    .padding(6)
-                    .overlay(RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(NSColor.separatorColor), lineWidth: 1))
-                if notesBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text("Add a note to keep with this board.")
-                        .foregroundColor(.secondary)
-                        .padding(10)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var notesBinding: Binding<String> {
-        Binding(get: {
-            store.doc.chatSettings.notes
-        }, set: { newValue in
-            store.updateChatSettings { $0.notes = newValue }
-        })
-    }
-}
-
 private struct PanelResizeHandles: View {
     @EnvironmentObject var store: BoardStore
     var frame: CGRect
@@ -3995,11 +4477,13 @@ struct MemoriesPanelView: View {
             .padding(12)
         }
         .contentShape(Rectangle())
+#if os(macOS)
         .focusable(true)
+        .hidePanelFocusRing()
         .focused($panelFocused)
         .onTapGesture { panelFocused = true }
-        .focusedValue(\.findTarget, panelFocused ? findTarget : nil)
         .onExitCommand { pendingFindCommand = .close }
+#endif
     }
 }
 

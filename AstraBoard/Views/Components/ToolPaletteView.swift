@@ -108,6 +108,8 @@ struct ToolPaletteView: View {
                     .cornerRadius(8)
                     .help("Add Shape")
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
             Button {
                 store.togglePanel(.settings)
                 store.hideToolMenu()
@@ -119,20 +121,6 @@ struct ToolPaletteView: View {
                     .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
                     .cornerRadius(8)
                     .help("Settings")
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                store.togglePanel(.notes)
-                store.hideToolMenu()
-            } label: {
-                Image(systemName: "person.crop.circle")
-                    .frame(width: 32, height: 32)
-                    .background(store.doc.ui.panels.notes.isOpen ? activeButtonBackground : buttonBackground)
-                    .foregroundColor(.primary)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(borderColor, lineWidth: 1))
-                    .cornerRadius(8)
-                    .help("Notes")
             }
             .buttonStyle(.plain)
 

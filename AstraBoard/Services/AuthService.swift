@@ -26,7 +26,12 @@ final class AuthService: ObservableObject {
         let resolvedService = supabaseService ?? (try? SupabaseService())
         if let resolvedService {
             self.supabase = resolvedService.client
-            self.user = resolvedService.client.auth.currentUser
+            if let session = resolvedService.client.auth.currentSession,
+               !session.isExpired {
+                self.user = session.user
+            } else {
+                self.user = nil
+            }
         } else {
             self.supabase = nil
             self.user = nil
@@ -101,7 +106,12 @@ final class AuthService: ObservableObject {
             for await change in supabase.auth.authStateChanges {
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    self?.user = change.session?.user
+                    if let session = change.session,
+                       !session.isExpired {
+                        self?.user = session.user
+                    } else {
+                        self?.user = nil
+                    }
                 }
             }
         }

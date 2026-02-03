@@ -39,6 +39,9 @@ final class SupabaseService {
 
         self.url = url
         self.publishableKey = key
-        self.client = SupabaseClient(supabaseURL: url, supabaseKey: key)
+        let options = SupabaseClientOptions(
+            auth: .init(emitLocalSessionAsInitialSession: true)
+        )
+        self.client = SupabaseClient(supabaseURL: url, supabaseKey: key, options: options)
     }
 }

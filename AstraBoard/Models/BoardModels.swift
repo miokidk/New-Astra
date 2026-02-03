@@ -615,7 +615,6 @@ struct PanelsState: Codable {
     var memories: PanelBox
     var shapeStyle: PanelBox
     var settings: PanelBox
-    var notes: PanelBox
     var reminder: PanelBox
 
     private enum CodingKeys: String, CodingKey {
@@ -625,7 +624,6 @@ struct PanelsState: Codable {
         case memories
         case shapeStyle
         case settings
-        case notes
         case reminder
     }
 
@@ -636,7 +634,6 @@ struct PanelsState: Codable {
         memories: PanelBox,
         shapeStyle: PanelBox,
         settings: PanelBox,
-        notes: PanelBox,
         reminder: PanelBox
     ) {
         self.chat = chat
@@ -645,7 +642,6 @@ struct PanelsState: Codable {
         self.memories = memories
         self.shapeStyle = shapeStyle
         self.settings = settings
-        self.notes = notes
         self.reminder = reminder
     }
 
@@ -663,16 +659,8 @@ struct PanelsState: Codable {
             ?? PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320)
         settings = try container.decodeIfPresent(PanelBox.self, forKey: .settings)
             ?? PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520)
-        notes = try container.decodeIfPresent(PanelBox.self, forKey: .notes)
-            ?? (try? decoder.container(keyedBy: LegacyCodingKeys.self)
-                .decodeIfPresent(PanelBox.self, forKey: .personality))
-            ?? PanelBox(isOpen: false, x: 640, y: 360, w: 380, h: 320)
         reminder = try container.decodeIfPresent(PanelBox.self, forKey: .reminder) // Decode new property
             ?? PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Default value for reminder panel
-    }
-
-    private enum LegacyCodingKeys: String, CodingKey {
-        case personality
     }
 }
 
@@ -1239,7 +1227,6 @@ extension BoardDoc {
             memories: PanelBox(isOpen: false, x: 300, y: 200, w: 420, h: 520),
             shapeStyle: PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320),
             settings: PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520),
-            notes: PanelBox(isOpen: false, x: 640, y: 360, w: 380, h: 320),
             reminder: PanelBox(isOpen: false, x: 420, y: 120, w: 360, h: 260) // Initialize new reminder panel
         )
         return BoardDoc(
