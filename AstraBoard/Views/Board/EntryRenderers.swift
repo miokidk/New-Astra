@@ -500,6 +500,12 @@ private struct AutoSizingTextView: NSViewRepresentable {
     var isEditable: Bool
     var zoom: CGFloat
     var colorScheme: ColorScheme
+
+    final class BoardEntryTextView: NSTextView {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+    }
     
     private func applyStyle(_ textView: NSTextView) {
             let scale = max(zoom, 0.001)
@@ -556,7 +562,7 @@ private struct AutoSizingTextView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextView {
-        let textView = NSTextView()
+        let textView = BoardEntryTextView()
         textView.delegate = context.coordinator
         textView.drawsBackground = false
         textView.isContinuousSpellCheckingEnabled = true

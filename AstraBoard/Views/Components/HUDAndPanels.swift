@@ -116,7 +116,6 @@ struct HUDView: View {
     
     @State private var dragOffset: CGSize = .zero
     @State private var inputHeight: CGFloat = 56
-    @State private var chatPanelHeight: CGFloat = ChatDockedPanelView.collapsedHeight()
     @State private var isMultiLineInput = false
     @State private var textFieldKey: UUID = UUID() // Add this to force refresh
     @State private var suppressToggleAfterDrag = false
@@ -158,24 +157,17 @@ struct HUDView: View {
                 ChatDockedPanelView(isCollapsed: !store.doc.ui.panels.chat.isOpen,
                                     chatInput: $chatInput,
                                     onSend: onSend,
-                                    maxHeight: chatPanelMaxHeight,
-                                    onHeightChange: { height in
-                                        chatPanelHeight = height
-                                    })
+                                    maxHeight: chatPanelMaxHeight)
                     .frame(width: max(0, size.width - chatPanelHorizontalInset * 2))
                     .padding(.bottom, panelBottomPadding(for: size.height))
+
                 hudBar(size: size)
+                    .zIndex(1)
             }
-            .frame(width: size.width)
+            .frame(width: size.width, height: size.height, alignment: .bottom)
             .offset(x: store.doc.ui.hud.x.cg + dragOffset.width,
-                    y: hudStackOffsetY)
+                    y: hudOffsetY)
             .onChange(of: store.doc.ui.panels.chat.isOpen) { isOpen in
-                // Ensure the bar stays anchored during expand/collapse even before the panel reports its height.
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    chatPanelHeight = isOpen
-                        ? ChatDockedPanelView.expandedMinimumHeight(maxHeight: chatPanelMaxHeight)
-                        : ChatDockedPanelView.collapsedHeight()
-                }
                 updateHudExtraHeight()
             }
             .onChange(of: chatInput) { newValue in
@@ -208,10 +200,6 @@ struct HUDView: View {
             }
             .onAppear {
                 handlePendingWakeWord()
-                // Keep the bar anchored if the chat panel is persisted open.
-                chatPanelHeight = store.doc.ui.panels.chat.isOpen
-                    ? ChatDockedPanelView.expandedMinimumHeight(maxHeight: chatPanelMaxHeight)
-                    : ChatDockedPanelView.collapsedHeight()
                 updateHudExtraHeight()
             }
             .onChange(of: appModel.pendingWakeWord) { _ in
@@ -438,9 +426,10 @@ struct HUDView: View {
     }
 
     private var chatPanelMaxHeight: CGFloat {
-        let fallback: CGFloat = 360
+        // Increased for larger chat panel when expanded
+        let fallback: CGFloat = 500  // Increased from 360
         guard store.viewportSize.height > 0 else { return fallback }
-        let viewportCap = min(fallback, max(200, store.viewportSize.height * 0.45))
+        let viewportCap = min(fallback, max(250, store.viewportSize.height * 0.55))  // Increased from 0.45 to 0.55
         return viewportCap
     }
 
@@ -453,10 +442,6 @@ struct HUDView: View {
         if abs(store.hudExtraHeight - next) > 0.5 {
             store.hudExtraHeight = next
         }
-    }
-
-    private var panelAboveBar: CGFloat {
-        max(0, chatPanelHeight - actualChatPanelOverlap)
     }
 
     private func panelBottomPadding(for barHeight: CGFloat) -> CGFloat {
@@ -493,10 +478,6 @@ struct HUDView: View {
         }
         let minY = max(0, store.hudExtraHeight)
         return max(baseY, minY)
-    }
-
-    private var hudStackOffsetY: CGFloat {
-        hudOffsetY - panelAboveBar
     }
 
     private var hasChatInputText: Bool {
@@ -809,10 +790,11 @@ struct FloatingPanelView<Content: View>: View {
 
     var body: some View {
         let minSize = BoardStore.panelMinSize(for: panelKind)
-        let frame = CGRect(x: box.x.cg,
-                           y: box.y.cg,
-                           width: max(minSize.width, box.w.cg),
-                           height: max(minSize.height, box.h.cg))
+        let rawFrame = CGRect(x: box.x.cg,
+                              y: box.y.cg,
+                              width: box.w.cg,
+                              height: box.h.cg)
+        let frame = store.clampedPanelFrame(rawFrame, kind: panelKind)
 
         return panelBody(frame: frame, minSize: minSize)
     }
@@ -880,9 +862,13 @@ private enum ChatScrollAnchor {
 
 private final class ChatScrollState {
     var isPinnedToBottom: Bool = true
-    var autoScrollWorkItem: DispatchWorkItem?
     weak var scrollView: NSScrollView?
     var lastContentHeight: CGFloat = 0
+
+    // We explicitly track if the user is interacting to distinguish
+    // "drift caused by content growth" vs "user scrolled up".
+    var isUserScrolling: Bool = false
+    var userScrollResetWorkItem: DispatchWorkItem?
 }
 
 private struct ChatScrollObserver: NSViewRepresentable {
@@ -903,6 +889,7 @@ private struct ChatScrollObserver: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onScroll = onScroll
         context.coordinator.onContentSizeChange = onContentSizeChange
+        // Re-attach if the view hierarchy shifted, though usually stable
         context.coordinator.attach(to: nsView)
     }
 
@@ -921,7 +908,9 @@ private struct ChatScrollObserver: NSViewRepresentable {
         }
 
         func attach(to view: NSView) {
-            guard scrollView == nil else { return }
+            // If we already have a valid scrollview, don't re-attach unless it changed
+            if let current = scrollView, current.superview != nil { return }
+
             if let sv = findEnclosingScrollView(from: view) {
                 attach(scrollView: sv)
             } else if !pendingAttach {
@@ -951,6 +940,11 @@ private struct ChatScrollObserver: NSViewRepresentable {
         private func attach(scrollView: NSScrollView) {
             self.scrollView = scrollView
             scrollView.contentView.postsBoundsChangedNotifications = true
+
+            // Remove old observers if any
+            if let obs = boundsObserver { NotificationCenter.default.removeObserver(obs) }
+            if let obs = frameObserver { NotificationCenter.default.removeObserver(obs) }
+
             boundsObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification,
                 object: scrollView.contentView,
@@ -970,6 +964,7 @@ private struct ChatScrollObserver: NSViewRepresentable {
                     self.onContentSizeChange(sv)
                 }
             }
+            // Initial check
             onScroll(scrollView)
         }
 
@@ -993,9 +988,10 @@ private struct ChatDockedPanelView: View {
     let maxHeight: CGFloat
     var onHeightChange: ((CGFloat) -> Void)? = nil
 
+    // We keep state in a class to share it mutably between the view body and the scroll observer
+    // without triggering view refreshes for internal logic.
     @State private var scrollState = ChatScrollState()
-    @State private var contentHeight: CGFloat = 0
-    @State private var lastReportedHeight: CGFloat = 0
+    @State private var showsIndicators: Bool = false
     @FocusState private var panelFocused: Bool
 
     @State private var isFindVisible: Bool = false
@@ -1003,14 +999,18 @@ private struct ChatDockedPanelView: View {
     @State private var findMatches: [UUID] = []
     @State private var findIndex: Int = 0
     @State private var pendingFindCommand: FindCommand?
+    
+    // Fixed height management - no dynamic sizing
+    @State private var actualScrollHeight: CGFloat = 0  // Always uses maxHeight when expanded
 
     private enum Layout {
         static let cornerRadius: CGFloat = 18
         static let contentPadding: CGFloat = 12
         static let headerHeight: CGFloat = 30
         static let dividerHeight: CGFloat = 1
-        static let pinThreshold: CGFloat = 12
+        static let pinThreshold: CGFloat = 20
         static let minContentHeight: CGFloat = 140
+        static let contentShrinkThreshold: CGFloat = 24
     }
 
     static func collapsedHeight() -> CGFloat {
@@ -1038,7 +1038,9 @@ private struct ChatDockedPanelView: View {
     }
 
     private var scrollHeight: CGFloat {
-        min(maxHeight, max(contentHeight, Layout.minContentHeight))
+        // Use actualScrollHeight directly without fallback logic
+        // This ensures the frame is always using a stable value
+        actualScrollHeight > 0 ? actualScrollHeight : Layout.minContentHeight
     }
 
     private var totalPanelHeight: CGFloat {
@@ -1048,27 +1050,6 @@ private struct ChatDockedPanelView: View {
         return Layout.headerHeight + Layout.dividerHeight + scrollHeight + Layout.contentPadding * 2
     }
 
-    private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        scrollState.autoScrollWorkItem?.cancel()
-
-        let item = DispatchWorkItem {
-            if animated {
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
-                }
-            } else {
-                var txn = Transaction()
-                txn.disablesAnimations = true
-                withTransaction(txn) {
-                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
-                }
-            }
-        }
-
-        scrollState.autoScrollWorkItem = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
-    }
-
     private enum FindCommand: Equatable {
         case open
         case next
@@ -1076,73 +1057,102 @@ private struct ChatDockedPanelView: View {
         case close
     }
 
+    private func sanitizedContentHeight(_ height: CGFloat) -> CGFloat {
+        // Simple sanitization - only used for tracking, not sizing
+        guard height.isFinite, height > 0 else { return 0 }
+        return height
+    }
+
+    private func updateContentHeight(_ height: CGFloat) {
+        // FIXED HEIGHT STRATEGY: Always use maxHeight when expanded
+        // This completely eliminates any "expanding with content" behavior
+        
+        let sanitized = sanitizedContentHeight(height)
+        
+        // Always use maxHeight - no dynamic sizing
+        let targetHeight = maxHeight
+        
+        // Only update if not already at target
+        guard actualScrollHeight != targetHeight else {
+            // Update scroll indicators even if height doesn't change
+            let shouldShow = sanitized >= maxHeight - 6
+            if showsIndicators != shouldShow {
+                showsIndicators = shouldShow
+            }
+            return
+        }
+        
+        // Immediate update - no delays, no debouncing
+        actualScrollHeight = targetHeight
+        
+        // Update scroll indicators
+        let shouldShow = sanitized >= maxHeight - 6
+        showsIndicators = shouldShow
+        
+        // Report height change
+        reportHeight()
+    }
+
+    // MARK: - Core Scroll Logic
+
     private func updatePinnedState(using scrollView: NSScrollView) {
         guard let docView = scrollView.documentView else { return }
         scrollState.scrollView = scrollView
-        let docHeight = docView.bounds.height
-        if abs(contentHeight - docHeight) > 0.5 {
-            contentHeight = docHeight
-        }
-        if scrollState.lastContentHeight <= 0 {
-            scrollState.lastContentHeight = docHeight
-        }
-        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
-        let currentOffset = scrollView.contentView.bounds.origin.y
-        let distanceFromBottom: CGFloat
-        if docView.isFlipped {
-            distanceFromBottom = max(0, maxOffset - currentOffset)
-        } else {
-            distanceFromBottom = max(0, currentOffset)
-        }
-        let pinnedNow = distanceFromBottom <= Layout.pinThreshold
-        if pinnedNow != scrollState.isPinnedToBottom {
-            scrollState.isPinnedToBottom = pinnedNow
-            if !pinnedNow {
-                scrollState.autoScrollWorkItem?.cancel()
-            }
-        }
-    }
 
-    private func scrollToBottom(using scrollView: NSScrollView) {
-        guard let docView = scrollView.documentView else { return }
-        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
-        let targetOffset = docView.isFlipped ? maxOffset : 0
-        let currentOffset = scrollView.contentView.bounds.origin.y
-        if abs(currentOffset - targetOffset) > 0.5 {
-            scrollView.contentView.scroll(to: NSPoint(x: 0, y: targetOffset))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+        // Detect if this is a user-initiated scroll event vs a layout adjustment.
+        // We only unpin if the user is actively scrolling.
+        if scrollState.isUserScrolling {
+            let docHeight = docView.bounds.height
+            let maxOffset = max(0, docHeight - scrollView.contentView.bounds.height)
+            let currentOffset = scrollView.contentView.bounds.origin.y
+
+            let distanceFromBottom: CGFloat
+            if docView.isFlipped {
+                distanceFromBottom = max(0, maxOffset - currentOffset)
+            } else {
+                distanceFromBottom = max(0, currentOffset) // Standard macOS coords: 0 is bottom
+            }
+
+            let pinnedNow = distanceFromBottom <= Layout.pinThreshold
+            if pinnedNow != scrollState.isPinnedToBottom {
+                scrollState.isPinnedToBottom = pinnedNow
+            }
         }
     }
 
     private func handleContentSizeChange(using scrollView: NSScrollView) {
         guard let docView = scrollView.documentView else { return }
         scrollState.scrollView = scrollView
+
         let newHeight = docView.bounds.height
-        let oldHeight = scrollState.lastContentHeight
+        guard newHeight.isFinite, newHeight >= 0 else { return }
+
+        // Update panel height for UI sizing
+        updateContentHeight(newHeight)
+
+        // SCROLL FIX:
+        // If we are pinned, we MUST scroll to the new bottom immediately.
+        // We do not wait for animation or dispatch async, as that causes the "jump".
+        if scrollState.isPinnedToBottom {
+            scrollToBottomImmediate(using: scrollView)
+        }
+
         scrollState.lastContentHeight = newHeight
-        if abs(contentHeight - newHeight) > 0.5 {
-            contentHeight = newHeight
-        }
+    }
 
-        guard scrollState.isPinnedToBottom else { return }
-        guard oldHeight > 0 else {
-            scrollToBottom(using: scrollView)
-            return
-        }
+    private func scrollToBottomImmediate(using scrollView: NSScrollView) {
+        guard let docView = scrollView.documentView else { return }
+        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
 
-        if docView.isFlipped {
-            let delta = newHeight - oldHeight
-            if abs(delta) > 0.5 {
-                let maxOffset = max(0, newHeight - scrollView.contentView.bounds.height)
-                let currentOffset = scrollView.contentView.bounds.origin.y
-                let targetOffset = min(max(0, currentOffset + delta), maxOffset)
-                if abs(currentOffset - targetOffset) > 0.5 {
-                    scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetOffset))
-                    scrollView.reflectScrolledClipView(scrollView.contentView)
-                }
-            }
-        } else {
-            scrollToBottom(using: scrollView)
+        // Flipped = Top-left origin (standard for text/lists). maxOffset is bottom.
+        // Not flipped = Bottom-left origin. 0 is bottom.
+        let targetOffset = docView.isFlipped ? maxOffset : 0
+        let point = NSPoint(x: 0, y: targetOffset)
+
+        // Check if we actually need to scroll to avoid redundant drawing
+        if abs(scrollView.contentView.bounds.origin.y - targetOffset) > 0.5 {
+            scrollView.contentView.scroll(to: point)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
 
@@ -1270,6 +1280,17 @@ private struct ChatDockedPanelView: View {
         .help(help)
     }
 
+    private func noteUserScroll() {
+        scrollState.isUserScrolling = true
+        scrollState.userScrollResetWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak scrollState] in
+            scrollState?.isUserScrolling = false
+        }
+        scrollState.userScrollResetWorkItem = item
+        // Shorter timeout to reset "user scrolling" state quickly after letting go
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+    }
+
     var body: some View {
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let matchSummary: String = {
@@ -1294,7 +1315,7 @@ private struct ChatDockedPanelView: View {
 
                     ScrollViewReader { proxy in
                         ZStack(alignment: .top) {
-                            ScrollView(showsIndicators: contentHeight > maxHeight) {
+                            ScrollView(showsIndicators: showsIndicators) {
                                 VStack(alignment: .leading, spacing: 14) {
                                     warningView
 
@@ -1327,6 +1348,7 @@ private struct ChatDockedPanelView: View {
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 4)
+                                // ATTACH THE OBSERVER HERE
                                 .background(
                                     ChatScrollObserver(
                                         onScroll: { scrollView in
@@ -1336,9 +1358,16 @@ private struct ChatDockedPanelView: View {
                                             handleContentSizeChange(using: scrollView)
                                         }
                                     )
+                                    // Hit testing false so it doesn't block clicks, but it's just a 0-size view anyway
                                     .allowsHitTesting(false)
+                                    .opacity(0)
                                 )
                             }
+                            // Detect user gestures on the scrollview to toggle "isUserScrolling"
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 1)
+                                    .onChanged { _ in noteUserScroll() }
+                            )
 
                             FindBarView(
                                 isVisible: $isFindVisible,
@@ -1353,8 +1382,14 @@ private struct ChatDockedPanelView: View {
                         }
                         .frame(height: scrollHeight)
                         .onAppear {
+                            // Initial scroll to bottom
                             DispatchQueue.main.async {
-                                scheduleScrollToBottom(proxy, animated: false)
+                                if let sv = scrollState.scrollView {
+                                    scrollToBottomImmediate(using: sv)
+                                } else {
+                                    // Fallback if observer hasn't attached yet
+                                    proxy.scrollTo(ChatScrollAnchor.bottom, anchor: .bottom)
+                                }
                             }
                         }
                         .onChange(of: findQuery) { _ in
@@ -1365,6 +1400,8 @@ private struct ChatDockedPanelView: View {
                             applyFindCommand(cmd, proxy: proxy)
                             pendingFindCommand = nil
                         }
+                        // We do NOT use onChange(of: messageCount) -> scrollToBottom here.
+                        // The ChatScrollObserver handles that synchronously now.
                     }
                 }
             }
@@ -1376,10 +1413,17 @@ private struct ChatDockedPanelView: View {
         )
         .shadow(color: panelShadow, radius: 8, x: 0, y: 4)
         .frame(height: totalPanelHeight)
-        .onAppear { reportHeight() }
-        .onChange(of: totalPanelHeight) { _ in reportHeight() }
-        .onChange(of: isCollapsed) { _ in
+        .onAppear {
+            // Initialize to maxHeight for immediate stability
+            actualScrollHeight = maxHeight
+            reportHeight()
+        }
+        .onChange(of: isCollapsed) { collapsed in
             isFindVisible = false
+            if !collapsed {
+                // When expanding, set to max height immediately
+                actualScrollHeight = maxHeight
+            }
             reportHeight()
         }
         .contentShape(Rectangle())
@@ -1387,7 +1431,7 @@ private struct ChatDockedPanelView: View {
         .focusable(true)
         .hidePanelFocusRing()
         .focused($panelFocused)
-        .onTapGesture { panelFocused = true }
+        .panelFocusOnTap($panelFocused)
         .onExitCommand { pendingFindCommand = .close }
 #endif
     }
@@ -1395,8 +1439,8 @@ private struct ChatDockedPanelView: View {
     private func reportHeight() {
         guard let onHeightChange else { return }
         let height = totalPanelHeight
-        if abs(lastReportedHeight - height) > 0.5 {
-            lastReportedHeight = height
+        // Report without checking previous height since we control updates via stableScrollHeight
+        DispatchQueue.main.async {
             onHeightChange(height)
         }
     }
@@ -1408,6 +1452,7 @@ struct ChatPanelView: View {
     var onSend: (Bool) -> Void
 
     @State private var scrollState = ChatScrollState()
+    @State private var autoScrollWorkItem: DispatchWorkItem?
     @FocusState private var panelFocused: Bool
 
     @State private var isFindVisible: Bool = false
@@ -1417,7 +1462,7 @@ struct ChatPanelView: View {
     @State private var pendingFindCommand: FindCommand?
 
     private func scheduleScrollToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        scrollState.autoScrollWorkItem?.cancel()
+        autoScrollWorkItem?.cancel()
 
         let item = DispatchWorkItem {
             if animated {
@@ -1433,7 +1478,7 @@ struct ChatPanelView: View {
             }
         }
 
-        scrollState.autoScrollWorkItem = item
+        autoScrollWorkItem = item
         // small delay = lets layout settle + coalesces rapid token updates
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
     }
@@ -1452,6 +1497,7 @@ struct ChatPanelView: View {
     private func updatePinnedState(using scrollView: NSScrollView) {
         guard let docView = scrollView.documentView else { return }
         scrollState.scrollView = scrollView
+        noteUserScroll()
         if scrollState.lastContentHeight <= 0 {
             scrollState.lastContentHeight = docView.bounds.height
         }
@@ -1467,7 +1513,7 @@ struct ChatPanelView: View {
         if pinnedNow != scrollState.isPinnedToBottom {
             scrollState.isPinnedToBottom = pinnedNow
             if !pinnedNow {
-                scrollState.autoScrollWorkItem?.cancel()
+                autoScrollWorkItem?.cancel()
             }
         }
     }
@@ -1495,6 +1541,7 @@ struct ChatPanelView: View {
             scrollToBottom(using: scrollView)
             return
         }
+        guard !scrollState.isUserScrolling else { return }
 
         if docView.isFlipped {
             let delta = newHeight - oldHeight
@@ -1527,6 +1574,16 @@ struct ChatPanelView: View {
 
         findMatches = ids
         if findIndex >= ids.count { findIndex = 0 }
+    }
+
+    private func noteUserScroll() {
+        scrollState.isUserScrolling = true
+        scrollState.userScrollResetWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak scrollState] in
+            scrollState?.isUserScrolling = false
+        }
+        scrollState.userScrollResetWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
     }
 
     private func scrollToCurrentMatch(proxy: ScrollViewProxy) {
@@ -1698,7 +1755,7 @@ struct ChatPanelView: View {
         .focusable(true)
         .hidePanelFocusRing()
         .focused($panelFocused)
-        .onTapGesture { panelFocused = true }
+        .panelFocusOnTap($panelFocused)
         .onExitCommand { pendingFindCommand = .close }
 #endif
     }
@@ -1858,7 +1915,7 @@ struct ChatArchivePanelView: View {
         .focusable(true)
         .hidePanelFocusRing()
         .focused($panelFocused)
-        .onTapGesture { panelFocused = true }
+        .panelFocusOnTap($panelFocused)
         .onExitCommand { pendingFindCommand = .close }
 #endif
     }
@@ -1900,10 +1957,19 @@ private extension View {
             self.background(FocusRingDisabler())
         }
     }
+
+    func panelFocusOnTap(_ focus: FocusState<Bool>.Binding) -> some View {
+        simultaneousGesture(
+            TapGesture().onEnded { focus.wrappedValue = true },
+            including: .subviews
+        )
+    }
 }
 #else
 private extension View {
     func hidePanelFocusRing() -> some View { self }
+
+    func panelFocusOnTap(_ focus: FocusState<Bool>.Binding) -> some View { self }
 }
 #endif
 
@@ -2897,51 +2963,56 @@ private struct ChatMessageRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Button(action: { store.pinChatMessage(message) }) {
-                Image(systemName: "pin.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
-            }
-            .buttonStyle(.plain)
-            .foregroundColor(Color(NSColor.secondaryLabelColor))
-            .disabled(!hasContent)
-            .help("Pin to board")
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text(message.role.chatDisplayName)
-                        .font(ChatStyle.senderFont)
-                        .foregroundColor(Color(NSColor.secondaryLabelColor))
-                    if showsRetry {
-                        Button(action: onRetry) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                                .frame(width: 22, height: 22)
-                                .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(Color(NSColor.secondaryLabelColor))
-                        .help("Retry response")
-                    }
-                    if showsEdit && !isEditing {
-                        Button(action: startEditing) {
-                            Image(systemName: "pencil")
-                                .font(.system(size: 12, weight: .semibold))
-                                .frame(width: 22, height: 22)
-                                .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(Color(NSColor.secondaryLabelColor))
-                        .help("Edit message")
-                    }
+            VStack(spacing: 6) {
+                Button(action: { store.pinChatMessage(message) }) {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
                 }
-                if let messageDate {
-                    HStack(spacing: 6) {
-                        Text(messageDate, style: .date)
-                        Text(messageDate, style: .time)
+                .buttonStyle(.plain)
+                .foregroundColor(Color(NSColor.secondaryLabelColor))
+                .disabled(!hasContent)
+                .help("Pin to board")
+                if showsEdit && !isEditing {
+                    Button(action: startEditing) {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 12, weight: .semibold))
+                            .frame(width: 22, height: 22)
+                            .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
                     }
-                    .font(ChatStyle.timestampFont)
+                    .buttonStyle(.plain)
                     .foregroundColor(Color(NSColor.secondaryLabelColor))
+                    .help("Edit message")
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text(message.role.chatDisplayName)
+                            .font(ChatStyle.senderFont)
+                            .foregroundColor(Color(NSColor.secondaryLabelColor))
+                        if showsRetry {
+                            Button(action: onRetry) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(NSColor.secondaryLabelColor))
+                            .help("Retry response")
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if let messageDate {
+                        HStack(spacing: 6) {
+                            Text(messageDate, style: .date)
+                            Text(messageDate, style: .time)
+                        }
+                        .font(ChatStyle.timestampFont)
+                        .foregroundColor(Color(NSColor.secondaryLabelColor))
+                    }
                 }
                 if isEditing {
                     TextEditor(text: $draftText)
@@ -3258,6 +3329,10 @@ private enum ChatStyle {
 }
 
 private class CodeBlockTextView: NSTextView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override func drawBackground(in rect: NSRect) {
         // DON'T draw any background - keep it transparent
         // (Remove the code that was filling with bgColor)
@@ -3339,6 +3414,7 @@ private struct ChatRichTextView: NSViewRepresentable {
     let baseFont: NSFont
     let textColor: NSColor
     let lineSpacing: CGFloat
+    private static let maxIntrinsicHeight: CGFloat = 50_000
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -3367,7 +3443,7 @@ private struct ChatRichTextView: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                  height: CGFloat.greatestFiniteMagnitude)
+                                  height: Self.maxIntrinsicHeight)
         textView.textContainer?.widthTracksTextView = true
         textView.textContainer?.heightTracksTextView = false
         textView.textContainer?.lineBreakMode = .byWordWrapping
@@ -3485,11 +3561,11 @@ private struct ChatRichTextView: NSViewRepresentable {
 
         textView.textContainer?.containerSize = NSSize(
             width: availableWidth,
-            height: CGFloat.greatestFiniteMagnitude
+            height: Self.maxIntrinsicHeight
         )
 
         // Make sure the text view itself matches that width.
-        textView.setFrameSize(NSSize(width: availableWidth, height: CGFloat.greatestFiniteMagnitude))
+        textView.setFrameSize(NSSize(width: availableWidth, height: Self.maxIntrinsicHeight))
 
         updateHeight(for: textView, in: scrollView)
     }
@@ -3502,7 +3578,8 @@ private struct ChatRichTextView: NSViewRepresentable {
         layout.ensureLayout(for: container)
         let used = layout.usedRect(for: container)
         let measured = ceil(used.height + textView.textContainerInset.height * 2)
-        let clamped = max(1, measured)
+        guard measured.isFinite else { return }
+        let clamped = min(Self.maxIntrinsicHeight, max(1, measured))
         if abs(scrollView.intrinsicHeight - clamped) > 0.5 {
             scrollView.intrinsicHeight = clamped
             scrollView.invalidateIntrinsicContentSize()
@@ -3544,6 +3621,10 @@ private struct ChatRichTextView: NSViewRepresentable {
         // NEW: called whenever AppKit lays this view out (width becomes "real" here)
         var onLayout: ((PassThroughScrollView) -> Void)?
 
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
         override var intrinsicContentSize: NSSize {
             NSSize(width: NSView.noIntrinsicMetric, height: intrinsicHeight)
         }
@@ -3554,11 +3635,26 @@ private struct ChatRichTextView: NSViewRepresentable {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            if let parent = enclosingParentScrollView() {
+                parent.scrollWheel(with: event)
+                return
+            }
             if let next = nextResponder {
                 next.scrollWheel(with: event)
             } else {
                 super.scrollWheel(with: event)
             }
+        }
+
+        private func enclosingParentScrollView() -> NSScrollView? {
+            var current: NSView? = superview
+            while let view = current {
+                if let scrollView = view as? NSScrollView {
+                    return scrollView
+                }
+                current = view.superview
+            }
+            return nil
         }
     }
 }
@@ -3860,6 +3956,10 @@ struct PasteAwareTextField: NSViewRepresentable {
     final class PasteAwareScrollView: NSScrollView {
         var intrinsicHeight: CGFloat = 22
 
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
         override var intrinsicContentSize: NSSize {
             NSSize(width: NSView.noIntrinsicMetric, height: intrinsicHeight)
         }
@@ -3871,6 +3971,10 @@ struct PasteAwareTextField: NSViewRepresentable {
             didSet { needsDisplay = true }
         }
         var onHeightChange: ((CGFloat) -> Void)?
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
 
         private func pasteboardLooksLikeImage(_ pasteboard: NSPasteboard) -> Bool {
             // Promised images (e.g. “copy & delete” screenshots)
@@ -4482,7 +4586,7 @@ struct MemoriesPanelView: View {
         .focusable(true)
         .hidePanelFocusRing()
         .focused($panelFocused)
-        .onTapGesture { panelFocused = true }
+        .panelFocusOnTap($panelFocused)
         .onExitCommand { pendingFindCommand = .close }
 #endif
     }

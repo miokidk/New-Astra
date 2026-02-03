@@ -3009,16 +3009,36 @@ extension BoardStore {
         }
     }
 
-    private func clampedPanelFrame(_ frame: CGRect, kind: PanelKind) -> CGRect {
-        guard viewportSize != .zero else { return frame }
+    private func safeViewportSize() -> CGSize {
+        if viewportSize != .zero { return viewportSize }
+        #if os(macOS)
+        if let screen = NSScreen.main?.visibleFrame.size {
+            return screen
+        }
+        #endif
+        return CGSize(width: 1200, height: 800)
+    }
+
+    private func sanitizedValue(_ value: CGFloat, fallback: CGFloat) -> CGFloat {
+        value.isFinite ? value : fallback
+    }
+
+    func clampedPanelFrame(_ frame: CGRect, kind: PanelKind) -> CGRect {
         let minSize = Self.panelMinSize(for: kind)
         let padding = Self.panelPadding
-        let maxWidth = max(viewportSize.width - padding * 2, minSize.width)
-        let maxHeight = max(viewportSize.height - padding * 2, minSize.height)
-        let width = min(max(frame.width, minSize.width), maxWidth)
-        let height = min(max(frame.height, minSize.height), maxHeight)
-        let x = min(max(frame.origin.x, padding), viewportSize.width - width - padding)
-        let y = min(max(frame.origin.y, padding), viewportSize.height - height - padding)
+        let viewport = safeViewportSize()
+
+        let rawWidth = sanitizedValue(frame.width, fallback: minSize.width)
+        let rawHeight = sanitizedValue(frame.height, fallback: minSize.height)
+        let rawX = sanitizedValue(frame.origin.x, fallback: padding)
+        let rawY = sanitizedValue(frame.origin.y, fallback: padding)
+
+        let maxWidth = max(viewport.width - padding * 2, minSize.width)
+        let maxHeight = max(viewport.height - padding * 2, minSize.height)
+        let width = min(max(rawWidth, minSize.width), maxWidth)
+        let height = min(max(rawHeight, minSize.height), maxHeight)
+        let x = min(max(rawX, padding), viewport.width - width - padding)
+        let y = min(max(rawY, padding), viewport.height - height - padding)
         return CGRect(x: x, y: y, width: width, height: height)
     }
 }

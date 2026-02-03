@@ -375,19 +375,8 @@ class OllamaChatService {
                     break
                 }
                 
-                var logBuffer = ""
-                let logEveryChars = 80
-                
                 // Accumulate content to detect tool calls
                 if let content = chunk.message?.content {
-                    if !content.isEmpty {
-                        logBuffer += content
-                        if logBuffer.count >= logEveryChars || content.contains("\n") {
-                            let cleaned = logBuffer.replacingOccurrences(of: "\n", with: "\\n")
-                            print("DEBUG: Δ \(cleaned)")
-                            logBuffer = ""
-                        }
-                    }
                     accumulatedContent += content
                     
                     // Try to parse as JSON tool call
@@ -416,17 +405,12 @@ class OllamaChatService {
                 } else if chunk.done == true {
                     // Always send the done chunk
                     await onChunk(chunk)
-                    if !logBuffer.isEmpty {
-                        let cleaned = logBuffer.replacingOccurrences(of: "\n", with: "\\n")
-                        print("DEBUG: Δ \(cleaned)")
-                        logBuffer = ""
-                    }
                 }
                 
                 if chunk.done == true {
                     print("DEBUG: Stream complete. Accumulated content length: \(accumulatedContent.count)")
                     if detectedToolCall == nil && !accumulatedContent.isEmpty {
-                        print("DEBUG: Final content: \(accumulatedContent.prefix(200))...")
+                        print("DEBUG: Final content: \(accumulatedContent)")
                     }
                     break
                 }

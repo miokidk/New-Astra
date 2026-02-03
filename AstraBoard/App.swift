@@ -764,6 +764,10 @@ struct PastingChatTextView: NSViewRepresentable {
     final class ChatPastingTextView: NSTextView {
         var onPasteImage: (() -> Bool)?
 
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
         override func paste(_ sender: Any?) {
             // If clipboard has an image, attach it (don’t paste junk into the field).
             if onPasteImage?() == true { return }

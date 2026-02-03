@@ -240,6 +240,10 @@ struct NoteBodyTextView: NSViewRepresentable {
 final class NoteTextScrollView: NSScrollView {
     var intrinsicHeight: CGFloat = 22
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: intrinsicHeight)
     }
@@ -247,6 +251,10 @@ final class NoteTextScrollView: NSScrollView {
 
 final class NoteTextView: NSTextView {
     var onPasteImages: (() -> Bool)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
 
     override func paste(_ sender: Any?) {
         if onPasteImages?() == true { return }
