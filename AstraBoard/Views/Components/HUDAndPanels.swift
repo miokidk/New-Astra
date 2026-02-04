@@ -422,7 +422,7 @@ struct HUDView: View {
     }
 
     private func hudSize() -> CGSize {
-        BoardStore.hudSize
+        store.hudSize()
     }
 
     private var chatPanelMaxHeight: CGFloat {
@@ -875,11 +875,17 @@ private final class ChatScrollState {
     var isPinnedToBottom: Bool = true
     weak var scrollView: NSScrollView?
     var lastContentHeight: CGFloat = 0
-
-    // We explicitly track if the user is interacting to distinguish
-    // "drift caused by content growth" vs "user scrolled up".
+    
+    // Improved user scroll tracking
     var isUserScrolling: Bool = false
     var userScrollResetWorkItem: DispatchWorkItem?
+    
+    // NEW: Track if we're actively streaming
+    var isStreaming: Bool = false
+    
+    // NEW: Track scroll velocity to distinguish user vs content drift
+    var lastScrollOffset: CGFloat = 0
+    var lastScrollTime: Date = Date()
 }
 
 private struct ChatScrollObserver: NSViewRepresentable {
@@ -911,6 +917,8 @@ private struct ChatScrollObserver: NSViewRepresentable {
         private var boundsObserver: NSObjectProtocol?
         private var frameObserver: NSObjectProtocol?
         private var pendingAttach = false
+        private var pendingScrollUpdate = false
+        private var pendingContentUpdate = false
 
         init(onScroll: @escaping (NSScrollView) -> Void,
              onContentSizeChange: @escaping (NSScrollView) -> Void) {
@@ -962,7 +970,7 @@ private struct ChatScrollObserver: NSViewRepresentable {
                 queue: .main
             ) { [weak self] _ in
                 guard let self, let sv = self.scrollView else { return }
-                self.onScroll(sv)
+                self.scheduleScrollUpdate(sv)
             }
             if let docView = scrollView.documentView {
                 docView.postsFrameChangedNotifications = true
@@ -972,11 +980,11 @@ private struct ChatScrollObserver: NSViewRepresentable {
                     queue: .main
                 ) { [weak self] _ in
                     guard let self, let sv = self.scrollView else { return }
-                    self.onContentSizeChange(sv)
+                    self.scheduleContentUpdate(sv)
                 }
             }
             // Initial check
-            onScroll(scrollView)
+            scheduleScrollUpdate(scrollView)
         }
 
         deinit {
@@ -985,6 +993,26 @@ private struct ChatScrollObserver: NSViewRepresentable {
             }
             if let frameObserver {
                 NotificationCenter.default.removeObserver(frameObserver)
+            }
+        }
+
+        private func scheduleScrollUpdate(_ scrollView: NSScrollView) {
+            guard !pendingScrollUpdate else { return }
+            pendingScrollUpdate = true
+            DispatchQueue.main.async { [weak self, weak scrollView] in
+                guard let self, let scrollView else { return }
+                self.pendingScrollUpdate = false
+                self.onScroll(scrollView)
+            }
+        }
+
+        private func scheduleContentUpdate(_ scrollView: NSScrollView) {
+            guard !pendingContentUpdate else { return }
+            pendingContentUpdate = true
+            DispatchQueue.main.async { [weak self, weak scrollView] in
+                guard let self, let scrollView else { return }
+                self.pendingContentUpdate = false
+                self.onContentSizeChange(scrollView)
             }
         }
     }
@@ -1110,24 +1138,40 @@ private struct ChatDockedPanelView: View {
         guard let docView = scrollView.documentView else { return }
         scrollState.scrollView = scrollView
 
-        // Detect if this is a user-initiated scroll event vs a layout adjustment.
-        // We only unpin if the user is actively scrolling.
-        if scrollState.isUserScrolling {
-            let docHeight = docView.bounds.height
-            let maxOffset = max(0, docHeight - scrollView.contentView.bounds.height)
-            let currentOffset = scrollView.contentView.bounds.origin.y
+        let docHeight = docView.bounds.height
+        let maxOffset = max(0, docHeight - scrollView.contentView.bounds.height)
+        let currentOffset = scrollView.contentView.bounds.origin.y
 
-            let distanceFromBottom: CGFloat
-            if docView.isFlipped {
-                distanceFromBottom = max(0, maxOffset - currentOffset)
-            } else {
-                distanceFromBottom = max(0, currentOffset) // Standard macOS coords: 0 is bottom
-            }
+        let distanceFromBottom: CGFloat
+        if docView.isFlipped {
+            distanceFromBottom = max(0, maxOffset - currentOffset)
+        } else {
+            distanceFromBottom = max(0, currentOffset)
+        }
 
+        // NEW: Calculate scroll velocity
+        let now = Date()
+        let timeDelta = now.timeIntervalSince(scrollState.lastScrollTime)
+        let offsetDelta = currentOffset - scrollState.lastScrollOffset
+        let velocity = timeDelta > 0 ? abs(offsetDelta / timeDelta) : 0
+        
+        scrollState.lastScrollOffset = currentOffset
+        scrollState.lastScrollTime = now
+        
+        // IMPROVED: Only unpin on deliberate user scroll
+        // High velocity = user scrolling
+        // Low velocity during streaming = content drift (ignore)
+        let isDeliberateUserScroll = scrollState.isUserScrolling && velocity > 100
+        
+        if isDeliberateUserScroll {
             let pinnedNow = distanceFromBottom <= Layout.pinThreshold
             if pinnedNow != scrollState.isPinnedToBottom {
                 scrollState.isPinnedToBottom = pinnedNow
             }
+        } else if !scrollState.isStreaming {
+            // Only update pin state when NOT streaming to avoid drift
+            let pinnedNow = distanceFromBottom <= Layout.pinThreshold
+            scrollState.isPinnedToBottom = pinnedNow
         }
     }
 
@@ -1137,14 +1181,18 @@ private struct ChatDockedPanelView: View {
 
         let newHeight = docView.bounds.height
         guard newHeight.isFinite, newHeight >= 0 else { return }
+        
+        // NEW: Throttle height updates during streaming
+        let heightDelta = abs(newHeight - scrollState.lastContentHeight)
+        let shouldUpdateHeight = heightDelta > 20 || !scrollState.isStreaming
+        
+        if shouldUpdateHeight {
+            updateContentHeight(newHeight)
+        }
 
-        // Update panel height for UI sizing
-        updateContentHeight(newHeight)
-
-        // SCROLL FIX:
-        // If we are pinned, we MUST scroll to the new bottom immediately.
-        // We do not wait for animation or dispatch async, as that causes the "jump".
-        if scrollState.isPinnedToBottom {
+        // IMPROVED: Only scroll if truly pinned AND content actually grew
+        let contentGrew = newHeight > scrollState.lastContentHeight
+        if scrollState.isPinnedToBottom && contentGrew {
             scrollToBottomImmediate(using: scrollView)
         }
 
@@ -1295,13 +1343,7 @@ private struct ChatDockedPanelView: View {
 
     private func noteUserScroll() {
         scrollState.isUserScrolling = true
-        scrollState.userScrollResetWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak scrollState] in
-            scrollState?.isUserScrolling = false
-        }
-        scrollState.userScrollResetWorkItem = item
-        // Shorter timeout to reset "user scrolling" state quickly after letting go
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: item)
+        // Reset is now handled by DragGesture onEnded with 0.5s timeout
     }
 
     var body: some View {
@@ -1333,7 +1375,7 @@ private struct ChatDockedPanelView: View {
                                     warningView
 
                                     ForEach(Array(store.doc.chat.messages.enumerated()), id: \.element.id) { index, msg in
-                                        let canRetry = false
+                                        let canRetry = store.pendingChatReplies == 0 && msg.role == .assistant
                                         let canEdit = store.pendingChatReplies == 0 && msg.role == .user
                                         let isStreamingAssistant = store.pendingChatReplies > 0 &&
                                             index == store.doc.chat.messages.count - 1 &&
@@ -1378,8 +1420,20 @@ private struct ChatDockedPanelView: View {
                             }
                             // Detect user gestures on the scrollview to toggle "isUserScrolling"
                             .simultaneousGesture(
-                                DragGesture(minimumDistance: 1)
-                                    .onChanged { _ in noteUserScroll() }
+                                DragGesture(minimumDistance: 5)  // Increased from 1
+                                    .onChanged { value in
+                                        scrollState.isUserScrolling = true
+                                        noteUserScroll()
+                                    }
+                                    .onEnded { _ in
+                                        // Longer timeout to prevent premature reset
+                                        scrollState.userScrollResetWorkItem?.cancel()
+                                        let item = DispatchWorkItem { [weak scrollState] in
+                                            scrollState?.isUserScrolling = false
+                                        }
+                                        scrollState.userScrollResetWorkItem = item
+                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+                                    }
                             )
 
                             FindBarView(
@@ -1439,6 +1493,9 @@ private struct ChatDockedPanelView: View {
             }
             reportHeight()
         }
+        .onChange(of: store.isStreamingChatReply) { isStreaming in
+                scrollState.isStreaming = isStreaming
+            }
         .contentShape(Rectangle())
 #if os(macOS)
         .focusable(true)
@@ -1510,23 +1567,50 @@ struct ChatPanelView: View {
     private func updatePinnedState(using scrollView: NSScrollView) {
         guard let docView = scrollView.documentView else { return }
         scrollState.scrollView = scrollView
-        noteUserScroll()
+        
         if scrollState.lastContentHeight <= 0 {
             scrollState.lastContentHeight = docView.bounds.height
         }
-        let maxOffset = max(0, docView.bounds.height - scrollView.contentView.bounds.height)
+        
+        let docHeight = docView.bounds.height
+        let maxOffset = max(0, docHeight - scrollView.contentView.bounds.height)
         let currentOffset = scrollView.contentView.bounds.origin.y
+        
         let distanceFromBottom: CGFloat
         if docView.isFlipped {
             distanceFromBottom = max(0, maxOffset - currentOffset)
         } else {
             distanceFromBottom = max(0, currentOffset)
         }
-        let pinnedNow = distanceFromBottom <= pinThreshold
-        if pinnedNow != scrollState.isPinnedToBottom {
-            scrollState.isPinnedToBottom = pinnedNow
-            if !pinnedNow {
-                autoScrollWorkItem?.cancel()
+        
+        // Calculate scroll velocity
+        let now = Date()
+        let timeDelta = now.timeIntervalSince(scrollState.lastScrollTime)
+        let offsetDelta = currentOffset - scrollState.lastScrollOffset
+        let velocity = timeDelta > 0 ? abs(offsetDelta / timeDelta) : 0
+        
+        scrollState.lastScrollOffset = currentOffset
+        scrollState.lastScrollTime = now
+        
+        // Only unpin on deliberate user scroll
+        let isDeliberateUserScroll = scrollState.isUserScrolling && velocity > 100
+        
+        if isDeliberateUserScroll {
+            let pinnedNow = distanceFromBottom <= pinThreshold
+            if pinnedNow != scrollState.isPinnedToBottom {
+                scrollState.isPinnedToBottom = pinnedNow
+                if !pinnedNow {
+                    autoScrollWorkItem?.cancel()
+                }
+            }
+        } else if !scrollState.isStreaming {
+            // Only update pin state when NOT streaming to avoid drift
+            let pinnedNow = distanceFromBottom <= pinThreshold
+            if pinnedNow != scrollState.isPinnedToBottom {
+                scrollState.isPinnedToBottom = pinnedNow
+                if !pinnedNow {
+                    autoScrollWorkItem?.cancel()
+                }
             }
         }
     }
@@ -1547,31 +1631,24 @@ struct ChatPanelView: View {
         scrollState.scrollView = scrollView
         let newHeight = docView.bounds.height
         let oldHeight = scrollState.lastContentHeight
+        
+        // Only scroll if truly pinned AND content actually grew
+        let contentGrew = newHeight > oldHeight
+        
         scrollState.lastContentHeight = newHeight
 
         guard scrollState.isPinnedToBottom else { return }
+        guard contentGrew else { return }
         guard oldHeight > 0 else {
             scrollToBottom(using: scrollView)
             return
         }
+        
+        // Don't fight the user if they're actively scrolling
         guard !scrollState.isUserScrolling else { return }
 
-        if docView.isFlipped {
-            let delta = newHeight - oldHeight
-            if abs(delta) > 0.5 {
-                let maxOffset = max(0, newHeight - scrollView.contentView.bounds.height)
-                let currentOffset = scrollView.contentView.bounds.origin.y
-                let targetOffset = min(max(0, currentOffset + delta), maxOffset)
-                if abs(currentOffset - targetOffset) > 0.5 {
-                    scrollView.contentView.scroll(to: NSPoint(x: scrollView.contentView.bounds.origin.x, y: targetOffset))
-                    scrollView.reflectScrolledClipView(scrollView.contentView)
-                }
-            }
-        } else {
-            scrollToBottom(using: scrollView)
-        }
+        scrollToBottom(using: scrollView)
     }
-
     
     private func rebuildFindMatches() {
         let q = findQuery.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1704,7 +1781,7 @@ struct ChatPanelView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
                             ForEach(Array(store.doc.chat.messages.enumerated()), id: \.element.id) { index, msg in
-                                let canRetry = false
+                                let canRetry = store.pendingChatReplies == 0 && msg.role == .assistant
                                 let canEdit = store.pendingChatReplies == 0 && msg.role == .user
                                 let isStreamingAssistant = store.pendingChatReplies > 0 &&
                                     index == store.doc.chat.messages.count - 1 &&
@@ -1771,6 +1848,9 @@ struct ChatPanelView: View {
         .panelFocusOnTap($panelFocused)
         .onExitCommand { pendingFindCommand = .close }
 #endif
+        .onChange(of: store.isStreamingChatReply) { isStreaming in
+            scrollState.isStreaming = isStreaming
+        }
     }
 }
 
@@ -2975,30 +3055,7 @@ private struct ChatMessageRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(spacing: 6) {
-                Button(action: { store.pinChatMessage(message) }) {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(Color(NSColor.secondaryLabelColor))
-                .disabled(!hasContent)
-                .help("Pin to board")
-                if showsEdit && !isEditing {
-                    Button(action: startEditing) {
-                        Image(systemName: "pencil")
-                            .font(.system(size: 12, weight: .semibold))
-                            .frame(width: 22, height: 22)
-                            .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundColor(Color(NSColor.secondaryLabelColor))
-                    .help("Edit message")
-                }
-            }
+        HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .top, spacing: 8) {
                     HStack(spacing: 8) {
@@ -3014,8 +3071,29 @@ private struct ChatMessageRow: View {
                             }
                             .buttonStyle(.plain)
                             .foregroundColor(Color(NSColor.secondaryLabelColor))
-                            .help("Retry response")
+                            .help("Revert to this message")
                         }
+                        if showsEdit && !isEditing {
+                            Button(action: startEditing) {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .frame(width: 22, height: 22)
+                                    .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(NSColor.secondaryLabelColor))
+                            .help("Edit message")
+                        }
+                        Button(action: { store.pinChatMessage(message) }) {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .frame(width: 22, height: 22)
+                                .background(Circle().fill(Color(NSColor.controlBackgroundColor).opacity(0.9)))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(Color(NSColor.secondaryLabelColor))
+                        .disabled(!hasContent)
+                        .help("Pin to board")
                     }
                     Spacer(minLength: 0)
                     if let messageDate {
@@ -3881,7 +3959,18 @@ struct PasteAwareTextField: NSViewRepresentable {
         textView.importsGraphics = false
         textView.usesRuler = false
         textView.usesFontPanel = false
-        textView.isContinuousSpellCheckingEnabled = true
+        // Disable input helpers to avoid noisy system IME logs in the HUD field.
+        textView.disablesInputMethods = true
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.smartInsertDeleteEnabled = false
+        textView.enabledTextCheckingTypes = 0
+        if #available(macOS 13.0, *) {
+            textView.isAutomaticTextCompletionEnabled = false
+        }
         textView.allowsUndo = true
         textView.textContainerInset = NSSize(width: 6, height: 6)
         textView.drawsBackground = drawsBackground
@@ -3919,7 +4008,10 @@ struct PasteAwareTextField: NSViewRepresentable {
         if abs(scrollView.intrinsicHeight - measured) > 0.5 {
             scrollView.intrinsicHeight = measured
             scrollView.invalidateIntrinsicContentSize()
-            textView.onHeightChange?(measured)
+            let height = measured
+            DispatchQueue.main.async { [weak textView] in
+                textView?.onHeightChange?(height)
+            }
         }
     }
 
@@ -4002,6 +4094,14 @@ struct PasteAwareTextField: NSViewRepresentable {
             didSet { needsDisplay = true }
         }
         var onHeightChange: ((CGFloat) -> Void)?
+        var disablesInputMethods: Bool = true
+
+        override var inputContext: NSTextInputContext? {
+            if disablesInputMethods {
+                return nil
+            }
+            return super.inputContext
+        }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
             true
@@ -4102,83 +4202,87 @@ struct SettingsPanelView: View {
     @State private var email: String = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Account")
-                .font(.headline)
-            HStack(spacing: 8) {
-                TextField("Email", text: $email)
-                    .textFieldStyle(.roundedBorder)
-                Button(action: sendMagicLink) {
-                    if authService.isSendingLink {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                    } else {
-                        Text("Send sign-in link")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Account")
+                    .font(.headline)
+                HStack(spacing: 8) {
+                    TextField("Email", text: $email)
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: sendMagicLink) {
+                        if authService.isSendingLink {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Text("Send sign-in link")
+                        }
                     }
+                    .disabled(authService.isSendingLink || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                .disabled(authService.isSendingLink || email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            Text(authStatusText)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            if let message = authService.statusMessage {
-                Text(message)
+                Text(authStatusText)
                     .font(.caption)
                     .foregroundColor(.secondary)
-            }
-
-            Divider()
-
-            Text("Name")
-                .font(.headline)
-            TextField("Name", text: userNameBinding)
-                .textFieldStyle(.roundedBorder)
-
-            Text("Voice")
-                .font(.headline)
-            Picker("Voice", selection: voiceBinding) {
-                ForEach(ChatSettings.availableVoices, id: \.self) { voice in
-                    Text(voice.capitalized).tag(voice)
+                if let message = authService.statusMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
+
+                Divider()
+
+                Text("Name")
+                    .font(.headline)
+                TextField("Name", text: userNameBinding)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Voice")
+                    .font(.headline)
+                Picker("Voice", selection: voiceBinding) {
+                    ForEach(ChatSettings.availableVoices, id: \.self) { voice in
+                        Text(voice.capitalized).tag(voice)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 220)
+                Text("Stored preference; spoken replies are disabled.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Toggle("Always listening (wake word: \"Astra\")", isOn: alwaysListeningBinding)
+                    .toggleStyle(.switch)
+                Text("Starts voice input when Astra hears the wake word.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Divider()
+
+                Text("Sync (debug)")
+                    .font(.headline)
+                Text("Pull: \(syncService.pullStatusText)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("Push: \(syncService.pushStatusText)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Toggle("Sync across devices", isOn: syncEnabledBinding)
+                    .toggleStyle(.switch)
+                Text("Disables automatic pulls/pushes/persistence uploads until re-enabled.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Toggle("Vision Debug", isOn: visionDebugBinding)
+                    .toggleStyle(.switch)
+                Text("Shows raw vision JSON attached to chat messages.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Divider()
+
+                Text("HUD")
+                    .font(.headline)
+                hudBarColorRow
             }
-            .pickerStyle(.menu)
-            .frame(maxWidth: 220)
-            Text("Stored preference; spoken replies are disabled.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Toggle("Always listening (wake word: \"Astra\")", isOn: alwaysListeningBinding)
-                .toggleStyle(.switch)
-            Text("Starts voice input when Astra hears the wake word.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            Divider()
-
-            Text("Sync (debug)")
-                .font(.headline)
-            Text("Pull: \(syncService.pullStatusText)")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Text("Push: \(syncService.pushStatusText)")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Toggle("Sync across devices", isOn: syncEnabledBinding)
-                .toggleStyle(.switch)
-            Text("Disables automatic pulls/pushes/persistence uploads until re-enabled.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            Toggle("Vision Debug", isOn: visionDebugBinding)
-                .toggleStyle(.switch)
-            Text("Shows raw vision JSON attached to chat messages.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            Divider()
-
-            Text("HUD")
-                .font(.headline)
-            hudBarColorRow
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.bottom, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onDisappear {

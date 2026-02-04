@@ -383,7 +383,7 @@ struct MainView: View {
                 if store.doc.ui.workspaceMode == .canvas {
                     WorkspaceModeSwitcher(mode: Binding(
                         get: { store.doc.ui.workspaceMode },
-                        set: { store.doc.ui.workspaceMode = $0 }
+                        set: { store.setWorkspaceMode($0) }
                     ))
                     .padding(10)
                     .zIndex(30)
@@ -427,7 +427,7 @@ struct MainView: View {
                     }
                 }
         )
-        .frame(minWidth: 900, minHeight: 700)
+        .frame(minWidth: 520, minHeight: 420)
         .onChange(of: store.selection) { newSelection in
             if let active = activeTextEdit, !newSelection.contains(active) {
                 activeTextEdit = nil
@@ -448,11 +448,16 @@ struct MainView: View {
 
     @ViewBuilder
         private var workspaceLayer: some View {
-            if store.doc.ui.workspaceMode == .canvas {
+            switch store.doc.ui.workspaceMode {
+            case .canvas:
                 BoardGridView()
                 BoardWorldView(activeTextEdit: $activeTextEdit)
-            } else {
+            case .notes:
                 NotesWorkspaceView()
+            case .reminders:
+                RemindersWorkspaceView()
+            case .calendar:
+                CalendarWorkspaceView()
             }
         }
 

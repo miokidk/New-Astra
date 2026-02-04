@@ -476,8 +476,8 @@ struct ChatSettings: Codable {
 
 // MARK: - Reminders
 
-struct ReminderRecurrence: Codable {
-    enum Frequency: String, Codable {
+struct ReminderRecurrence: Codable, Hashable {
+    enum Frequency: String, Codable, Hashable {
         case hourly
         case daily
         case weekly
@@ -705,7 +705,7 @@ struct PanelsState: Codable {
         shapeStyle = try container.decodeIfPresent(PanelBox.self, forKey: .shapeStyle)
             ?? PanelBox(isOpen: false, x: 640, y: 140, w: 360, h: 320)
         settings = try container.decodeIfPresent(PanelBox.self, forKey: .settings)
-            ?? PanelBox(isOpen: false, x: 600, y: 120, w: 460, h: 520)
+            ?? PanelBox(isOpen: false, x: 600, y: 120, w: 480, h: 680)
         systemInstructions = try container.decodeIfPresent(PanelBox.self, forKey: .systemInstructions)
             ?? PanelBox(isOpen: false, x: 520, y: 120, w: 520, h: 420)
         reminder = try container.decodeIfPresent(PanelBox.self, forKey: .reminder) // Decode new property
@@ -718,6 +718,8 @@ struct PanelsState: Codable {
 enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
     case canvas
     case notes
+    case reminders
+    case calendar
 
     var id: String { rawValue }
 
@@ -725,7 +727,230 @@ enum WorkspaceMode: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .canvas: return "Canvas"
         case .notes: return "Notes"
+        case .reminders: return "Reminders"
+        case .calendar: return "Calendar"
         }
+    }
+}
+
+// MARK: - Calendar Workspace
+
+enum CalendarViewMode: String, Codable, CaseIterable, Identifiable {
+    case day
+    case threeDays
+    case week
+    case month
+    case year
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .day:
+            return "Day"
+        case .threeDays:
+            return "3 Days"
+        case .week:
+            return "Week"
+        case .month:
+            return "Month"
+        case .year:
+            return "Year"
+        }
+    }
+}
+
+struct CalendarEvent: Codable, Identifiable, Hashable {
+    enum RecurrenceFrequency: String, Codable, CaseIterable, Identifiable {
+        case daily
+        case weekly
+        case monthly
+        case yearly
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .daily: return "Daily"
+            case .weekly: return "Weekly"
+            case .monthly: return "Monthly"
+            case .yearly: return "Yearly"
+            }
+        }
+    }
+
+    struct Recurrence: Codable, Hashable {
+        var frequency: RecurrenceFrequency
+        var interval: Int
+
+        init(frequency: RecurrenceFrequency, interval: Int = 1) {
+            self.frequency = frequency
+            self.interval = max(1, interval)
+        }
+    }
+
+    var id: UUID
+    var title: String
+    var startAt: Double
+    var endAt: Double
+    var recurrence: Recurrence?
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        startAt: Double,
+        endAt: Double,
+        recurrence: Recurrence? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.startAt = startAt
+        self.endAt = endAt
+        self.recurrence = recurrence
+    }
+}
+
+struct CalendarWorkspace: Codable, Hashable {
+    var selectedDate: Double
+    var selectedView: CalendarViewMode
+    var events: [CalendarEvent]
+
+    static func `default`(now: Double = Date().timeIntervalSince1970) -> CalendarWorkspace {
+        let dayStart = Calendar.current
+            .startOfDay(for: Date(timeIntervalSince1970: now))
+            .timeIntervalSince1970
+        return CalendarWorkspace(
+            selectedDate: dayStart,
+            selectedView: .week,
+            events: []
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedDate
+        case selectedView
+        case events
+    }
+
+    init(selectedDate: Double, selectedView: CalendarViewMode, events: [CalendarEvent]) {
+        self.selectedDate = selectedDate
+        self.selectedView = selectedView
+        self.events = events.sorted { $0.startAt < $1.startAt }
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let fallbackDayStart = Calendar.current
+            .startOfDay(for: Date())
+            .timeIntervalSince1970
+        selectedDate = try c.decodeIfPresent(Double.self, forKey: .selectedDate) ?? fallbackDayStart
+        selectedView = try c.decodeIfPresent(CalendarViewMode.self, forKey: .selectedView) ?? .week
+        events = (try c.decodeIfPresent([CalendarEvent].self, forKey: .events) ?? [])
+            .sorted { $0.startAt < $1.startAt }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(selectedDate, forKey: .selectedDate)
+        try c.encode(selectedView, forKey: .selectedView)
+        try c.encode(events, forKey: .events)
+    }
+}
+
+// MARK: - Reminders Workspace
+
+struct ReminderChecklistItem: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var isCompleted: Bool
+    var dueAt: Double?
+    var recurrence: ReminderRecurrence?
+    var createdAt: Double
+    var completedAt: Double?
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        isCompleted: Bool = false,
+        dueAt: Double? = nil,
+        recurrence: ReminderRecurrence? = nil,
+        createdAt: Double = Date().timeIntervalSince1970,
+        completedAt: Double? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.isCompleted = isCompleted
+        self.dueAt = dueAt
+        self.recurrence = recurrence
+        self.createdAt = createdAt
+        self.completedAt = completedAt
+    }
+}
+
+struct ReminderChecklistList: Codable, Identifiable, Hashable {
+    var id: UUID
+    var title: String
+    var items: [ReminderChecklistItem]
+
+    init(id: UUID = UUID(), title: String, items: [ReminderChecklistItem] = []) {
+        self.id = id
+        self.title = title
+        self.items = items
+    }
+}
+
+struct RemindersWorkspace: Codable, Hashable {
+    var lists: [ReminderChecklistList]
+    var selectedListID: UUID?
+
+    static func `default`() -> RemindersWorkspace {
+        let list = ReminderChecklistList(title: "Reminders")
+        return RemindersWorkspace(lists: [list], selectedListID: list.id)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lists
+        case selectedListID
+    }
+
+    init(lists: [ReminderChecklistList], selectedListID: UUID?) {
+        self.lists = lists.map { list in
+            var normalized = list
+            normalized.items = Self.normalizedItemOrder(normalized.items)
+            return normalized
+        }
+        self.selectedListID = selectedListID
+        self.normalizeSelection()
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lists = try c.decodeIfPresent([ReminderChecklistList].self, forKey: .lists) ?? []
+        selectedListID = try c.decodeIfPresent(UUID.self, forKey: .selectedListID)
+        lists = lists.map { list in
+            var normalized = list
+            normalized.items = Self.normalizedItemOrder(normalized.items)
+            return normalized
+        }
+        normalizeSelection()
+    }
+
+    mutating func normalizeSelection() {
+        if lists.isEmpty {
+            selectedListID = nil
+            return
+        }
+        if let selectedListID,
+           lists.contains(where: { $0.id == selectedListID }) {
+            return
+        }
+        selectedListID = lists.first?.id
+    }
+
+    private static func normalizedItemOrder(_ items: [ReminderChecklistItem]) -> [ReminderChecklistItem] {
+        let open = items.filter { !$0.isCompleted }
+        let completed = items.filter { $0.isCompleted }
+        return open + completed
     }
 }
 
@@ -1125,7 +1350,9 @@ struct BoardDoc: Codable, Identifiable {
     var log: [LogItem]
     var ui: UIState
     var reminders: [ReminderItem]
+    var remindersWorkspace: RemindersWorkspace
     var notes: NotesWorkspace
+    var calendar: CalendarWorkspace
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -1143,7 +1370,9 @@ struct BoardDoc: Codable, Identifiable {
         case log
         case ui
         case reminders
+        case remindersWorkspace
         case notes
+        case calendar
     }
 
     init(
@@ -1177,7 +1406,9 @@ struct BoardDoc: Codable, Identifiable {
         self.log = log
         self.ui = ui
         self.reminders = []
+        self.remindersWorkspace = RemindersWorkspace.default()
         self.notes = NotesWorkspace.default(now: createdAt)
+        self.calendar = CalendarWorkspace.default(now: createdAt)
     }
 
     init(from decoder: Decoder) throws {
@@ -1195,9 +1426,13 @@ struct BoardDoc: Codable, Identifiable {
         chatHistory = try container.decodeIfPresent([ChatThread].self, forKey: .chatHistory) ?? []
         pendingClarification = try container.decodeIfPresent(PendingClarification.self, forKey: .pendingClarification)
         reminders = try container.decodeIfPresent([ReminderItem].self, forKey: .reminders) ?? []
+        remindersWorkspace = try container.decodeIfPresent(RemindersWorkspace.self, forKey: .remindersWorkspace)
+            ?? RemindersWorkspace.default()
 
         notes = try container.decodeIfPresent(NotesWorkspace.self, forKey: .notes)
-        ?? NotesWorkspace.default(now: Date().timeIntervalSince1970)
+            ?? NotesWorkspace.default(now: createdAt)
+        calendar = try container.decodeIfPresent(CalendarWorkspace.self, forKey: .calendar)
+            ?? CalendarWorkspace.default(now: createdAt)
 
         // ✅ back-compat: older docs may not have this key
         if let memories = try? container.decodeIfPresent([Memory].self, forKey: .memories) {
@@ -1229,7 +1464,9 @@ struct BoardDoc: Codable, Identifiable {
         try container.encode(log, forKey: .log)
         try container.encode(ui, forKey: .ui)
         try container.encode(reminders, forKey: .reminders)
+        try container.encode(remindersWorkspace, forKey: .remindersWorkspace)
         try container.encode(notes, forKey: .notes)
+        try container.encode(calendar, forKey: .calendar)
     }
 }
 

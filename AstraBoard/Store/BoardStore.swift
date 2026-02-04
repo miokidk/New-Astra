@@ -35,9 +35,12 @@ enum PanelKind {
 
 @MainActor
 final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
-    static let hudSize = CGSize(width: 780, height: 83)
+    static let hudBaseSize = CGSize(width: 780, height: 83)
+    static let hudMinWidth: CGFloat = 280
+    static let hudViewportInset: CGFloat = 12
     static let panelMinSize = CGSize(width: 260, height: 200)
-    private static let settingsPanelMinSize = CGSize(width: 460, height: 520)
+    private static let chatTitleMaxLength = 80
+    private static let settingsPanelMinSize = CGSize(width: 480, height: 680)
     private static let systemInstructionsPanelMinSize = CGSize(width: 520, height: 420)
     static func panelMinSize(for kind: PanelKind) -> CGSize {
         switch kind {
@@ -63,10 +66,13 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     private let chatService = OllamaChatService()
     private var chatReplyTask: Task<Void, Never>?
     private let chatModelName = "astra:oss20b"
+    private let backgroundSearchModelName = "astra:oss20b"
+    private var backgroundSearchTasks: [UUID: Task<Void, Never>] = [:]
     let modelfileURL = URL(fileURLWithPath: "/Users/astra/Documents/Astra/AstraBoard/Modelfile")
     private let modelfileSystemMarker = "SYSTEM \"\"\""
     private let contextTokenLimit = 2000
     private let contextKeepTailCount = 4
+    private let chatTitleTailCount = 6
     private var isCompilingContext = false
 
     @Published var doc: BoardDoc {
@@ -207,6 +213,7 @@ final class BoardStore: NSObject, ObservableObject, UNUserNotificationCenterDele
     @Published private(set) var chatActivityStatus: String?
     @Published private(set) var chatThinkingText: String?
     @Published var chatThinkingExpanded: Bool = false
+    @Published private(set) var isStreamingChatReply: Bool = false
     @Published var chatNeedsAttention: Bool = false
     @Published private(set) var isSpeaking: Bool = false
     @Published private(set) var isVoiceConversationActive: Bool = false
@@ -969,6 +976,49 @@ extension BoardStore {
                     }
                 }
             }
+        }
+
+        checkDueChecklistReminders(now: now)
+    }
+
+    @MainActor
+    private func checkDueChecklistReminders(now: Double) {
+        var didMutate = false
+
+        for listIndex in doc.remindersWorkspace.lists.indices {
+            let listTitle = doc.remindersWorkspace.lists[listIndex].title
+            for itemIndex in doc.remindersWorkspace.lists[listIndex].items.indices {
+                var item = doc.remindersWorkspace.lists[listIndex].items[itemIndex]
+
+                guard !item.isCompleted else { continue }
+                guard let dueAt = item.dueAt, dueAt <= now else { continue }
+
+                enqueueNotification(
+                    center: UNUserNotificationCenter.current(),
+                    title: "From Astra:",
+                    body: "\(item.title) (\(listTitle))"
+                )
+
+                if let recurrence = item.recurrence {
+                    var schedulerCopy = ReminderItem(
+                        title: item.title,
+                        work: item.title,
+                        dueAt: dueAt,
+                        recurrence: recurrence
+                    )
+                    calculateNextDueAt(for: &schedulerCopy, recurrence: recurrence, now: now)
+                    item.dueAt = schedulerCopy.dueAt
+                } else {
+                    item.dueAt = nil
+                }
+
+                doc.remindersWorkspace.lists[listIndex].items[itemIndex] = item
+                didMutate = true
+            }
+        }
+
+        if didMutate {
+            touch()
         }
     }
     
@@ -2025,6 +2075,52 @@ extension BoardStore {
         addLog("Edited text entry", related: [id])
         touch()
     }
+
+    func beginImageCrop(_ id: UUID) {
+        guard doc.entries[id] != nil else { return }
+        select(id)
+        doc.ui.activeImageCropID = id
+    }
+
+    func endImageCrop() {
+        guard doc.ui.activeImageCropID != nil else { return }
+        doc.ui.activeImageCropID = nil
+    }
+
+    func resetImageCrop(_ id: UUID) {
+        guard var entry = doc.entries[id] else { return }
+        guard entry.imageCrop != nil else { return }
+        recordUndoSnapshot(coalescingKey: "image-crop-\(id.uuidString)")
+        entry.imageCrop = nil
+        entry.updatedAt = Date().timeIntervalSince1970
+        doc.entries[id] = entry
+        touch()
+    }
+
+    func setImageCrop(_ id: UUID,
+                      crop: ImageCropInsets,
+                      recordUndo: Bool,
+                      fallbackUndoFrom: ImageCropInsets? = nil) {
+        guard var entry = doc.entries[id] else { return }
+        let clampedCrop = crop.clamped()
+        let baselineCrop = fallbackUndoFrom?.clamped() ?? entry.imageCrop
+
+        guard baselineCrop != clampedCrop else { return }
+
+        if recordUndo {
+            if entry.imageCrop != baselineCrop {
+                entry.imageCrop = baselineCrop
+                doc.entries[id] = entry
+            }
+            recordUndoSnapshot(coalescingKey: "image-crop-\(id.uuidString)")
+        }
+
+        guard var updated = doc.entries[id] else { return }
+        updated.imageCrop = clampedCrop
+        updated.updatedAt = Date().timeIntervalSince1970
+        doc.entries[id] = updated
+        touch()
+    }
 }
 
 #if os(macOS)
@@ -2868,10 +2964,151 @@ extension BoardStore {
 
 // MARK: - HUD / Panels
 extension BoardStore {
+    func setWorkspaceMode(_ mode: WorkspaceMode) {
+        guard doc.ui.workspaceMode != mode else { return }
+        recordUndoSnapshot(coalescingKey: "workspaceMode")
+        doc.ui.workspaceMode = mode
+    }
+
+    func setCalendarViewMode(_ mode: CalendarViewMode) {
+        guard doc.calendar.selectedView != mode else { return }
+        recordUndoSnapshot(coalescingKey: "calendarViewMode")
+        doc.calendar.selectedView = mode
+    }
+
+    func setCalendarSelectedDate(_ date: Date) {
+        let dayStart = Calendar.current.startOfDay(for: date).timeIntervalSince1970
+        guard doc.calendar.selectedDate != dayStart else { return }
+        recordUndoSnapshot(coalescingKey: "calendarSelectedDate")
+        doc.calendar.selectedDate = dayStart
+    }
+
+    func addCalendarEvent(on date: Date? = nil) {
+        let calendar = Calendar.current
+        let baseDate = date ?? Date(timeIntervalSince1970: doc.calendar.selectedDate)
+        let dayStart = calendar.startOfDay(for: baseDate)
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400)
+
+        let eventsForDay = doc.calendar.events
+            .filter { calendar.isDate(Date(timeIntervalSince1970: $0.startAt), inSameDayAs: dayStart) }
+            .sorted { $0.startAt < $1.startAt }
+
+        let defaultStart = calendar.date(byAdding: .hour, value: 9, to: dayStart) ?? dayStart
+        let lastEnd = eventsForDay.last.map { Date(timeIntervalSince1970: $0.endAt) }
+        var start = defaultStart
+        if let lastEnd, lastEnd > start {
+            start = lastEnd
+        }
+        if start >= dayEnd {
+            start = calendar.date(byAdding: .hour, value: 23, to: dayStart) ?? dayStart
+        }
+
+        let oneHourLater = calendar.date(byAdding: .hour, value: 1, to: start) ?? start.addingTimeInterval(3_600)
+        let end = oneHourLater > dayEnd ? dayEnd : oneHourLater
+
+        let event = CalendarEvent(
+            title: "New Event",
+            startAt: start.timeIntervalSince1970,
+            endAt: end.timeIntervalSince1970,
+            recurrence: nil
+        )
+
+        recordUndoSnapshot(coalescingKey: "calendarAddEvent")
+        doc.calendar.events.append(event)
+        doc.calendar.events.sort { $0.startAt < $1.startAt }
+        doc.calendar.selectedDate = dayStart.timeIntervalSince1970
+    }
+
+    func createCalendarEvent(
+        title: String,
+        start: Date,
+        lengthMinutes: Int,
+        recurrence: CalendarEvent.Recurrence?
+    ) {
+        let safeLength = max(5, lengthMinutes)
+        let end = start.addingTimeInterval(TimeInterval(safeLength * 60))
+        let finalTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "New Event"
+            : title.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let event = CalendarEvent(
+            title: finalTitle,
+            startAt: start.timeIntervalSince1970,
+            endAt: end.timeIntervalSince1970,
+            recurrence: recurrence
+        )
+
+        recordUndoSnapshot(coalescingKey: "calendarCreateEvent")
+        doc.calendar.events.append(event)
+        doc.calendar.events.sort { $0.startAt < $1.startAt }
+        doc.calendar.selectedDate = Calendar.current.startOfDay(for: start).timeIntervalSince1970
+    }
+
+    func updateCalendarEvent(
+        id: UUID,
+        title: String,
+        start: Date,
+        lengthMinutes: Int,
+        recurrence: CalendarEvent.Recurrence?
+    ) {
+        guard let index = doc.calendar.events.firstIndex(where: { $0.id == id }) else { return }
+        let safeLength = max(5, lengthMinutes)
+        let end = start.addingTimeInterval(TimeInterval(safeLength * 60))
+        let finalTitle = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "New Event"
+            : title.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        recordUndoSnapshot(coalescingKey: "calendarUpdateEvent")
+        doc.calendar.events[index].title = finalTitle
+        doc.calendar.events[index].startAt = start.timeIntervalSince1970
+        doc.calendar.events[index].endAt = end.timeIntervalSince1970
+        doc.calendar.events[index].recurrence = recurrence
+        doc.calendar.events.sort { $0.startAt < $1.startAt }
+        doc.calendar.selectedDate = Calendar.current.startOfDay(for: start).timeIntervalSince1970
+    }
+
+    func deleteCalendarEvent(id: UUID) {
+        guard doc.calendar.events.contains(where: { $0.id == id }) else { return }
+        recordUndoSnapshot(coalescingKey: "calendarDeleteEvent")
+        doc.calendar.events.removeAll { $0.id == id }
+    }
+
+    func setNotesSidebarCollapsed(_ isCollapsed: Bool) {
+        guard doc.notes.sidebarCollapsed != isCollapsed else { return }
+        recordUndoSnapshot(coalescingKey: "notesSidebar")
+        doc.notes.sidebarCollapsed = isCollapsed
+    }
+
+    func hudSize() -> CGSize {
+        Self.hudSize(for: viewportSize)
+    }
+
+    static func hudSize(for viewportSize: CGSize) -> CGSize {
+        let base = hudBaseSize
+        guard viewportSize.width > 0 else { return base }
+
+        let maxWidth = max(0, viewportSize.width - hudViewportInset * 2)
+        if maxWidth <= 0 {
+            return base
+        }
+
+        let targetWidth = min(base.width, maxWidth)
+        let width: CGFloat
+        if maxWidth < hudMinWidth {
+            width = maxWidth
+        } else {
+            width = max(targetWidth, hudMinWidth)
+        }
+
+        return CGSize(width: width, height: base.height)
+    }
+
     func toggleHUD() {
         recordUndoSnapshot()
         doc.ui.hud.isVisible.toggle()
         clampHUDPosition()
+        touch()
+        persistHUDStateImmediately()
     }
 
     func moveHUD(by delta: CGSize) {
@@ -2879,10 +3116,13 @@ extension BoardStore {
         recordUndoSnapshot(coalescingKey: "hudMove")
         doc.ui.hud.x += delta.width.double
         doc.ui.hud.y += delta.height.double
+        clampHUDPosition()
+        touch()
+        persistHUDStateImmediately()
     }
 
     func clampHUDPosition() {
-        let size = Self.hudSize
+        let size = hudSize()
         let maxX = max(0, viewportSize.width - size.width)
         let maxY = max(0, viewportSize.height - size.height)
         let clampedX = min(max(doc.ui.hud.x, 0), maxX.double)
@@ -2893,6 +3133,10 @@ extension BoardStore {
         if clampedY != doc.ui.hud.y {
             doc.ui.hud.y = clampedY
         }
+    }
+
+    private func persistHUDStateImmediately() {
+        _ = persistence.save(doc: doc)
     }
 
     func togglePanel(_ kind: PanelKind) {
@@ -3075,10 +3319,14 @@ extension BoardStore {
         let rawX = sanitizedValue(frame.origin.x, fallback: padding)
         let rawY = sanitizedValue(frame.origin.y, fallback: padding)
 
-        let maxWidth = max(viewport.width - padding * 2, minSize.width)
-        let maxHeight = max(viewport.height - padding * 2, minSize.height)
-        let width = min(max(rawWidth, minSize.width), maxWidth)
-        let height = min(max(rawHeight, minSize.height), maxHeight)
+        let availableWidth = max(viewport.width - padding * 2, 0)
+        let availableHeight = max(viewport.height - padding * 2, 0)
+        let minWidth = min(minSize.width, availableWidth)
+        let minHeight = min(minSize.height, availableHeight)
+        let maxWidth = max(availableWidth, minWidth)
+        let maxHeight = max(availableHeight, minHeight)
+        let width = min(max(rawWidth, minWidth), maxWidth)
+        let height = min(max(rawHeight, minHeight), maxHeight)
         let x = min(max(rawX, padding), viewport.width - width - padding)
         let y = min(max(rawY, padding), viewport.height - height - padding)
         return CGRect(x: x, y: y, width: width, height: height)
@@ -3393,6 +3641,50 @@ extension BoardStore {
         guard !thread.messages.isEmpty else { return }
         doc.chatHistory.removeAll { $0.id == thread.id }
         doc.chatHistory.append(thread)
+        requestChatTitleIfNeeded(for: thread)
+    }
+
+    @MainActor
+    private func requestChatTitleIfNeeded(for thread: ChatThread) {
+        let existingTitle = thread.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard existingTitle.isEmpty else { return }
+
+        let threadId = thread.id
+        let summariesSnapshot = thread.contextSummaries
+        let messagesSnapshot = thread.messages
+        let model = chatModelName
+        let service = chatService
+        let tailCount = chatTitleTailCount
+
+        Task.detached { [weak self] in
+            guard let self else { return }
+
+            let context = Self.chatTitleContext(
+                summaries: summariesSnapshot,
+                messages: messagesSnapshot,
+                tailCount: tailCount
+            )
+            let rawTitle = await Self.generateChatTitle(
+                model: model,
+                service: service,
+                context: context
+            )
+            let cleanedTitle = Self.cleanChatTitle(rawTitle)
+            let fallbackTitle = cleanedTitle.isEmpty
+                ? Self.fallbackChatTitle(from: messagesSnapshot)
+                : cleanedTitle
+
+            guard !fallbackTitle.isEmpty else { return }
+
+            await MainActor.run {
+                guard let index = self.doc.chatHistory.firstIndex(where: { $0.id == threadId }) else { return }
+                let currentTitle = self.doc.chatHistory[index].title?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                guard currentTitle.isEmpty else { return }
+                self.doc.chatHistory[index].title = fallbackTitle
+                self.touch()
+            }
+        }
     }
 
     @MainActor
@@ -3641,8 +3933,37 @@ extension BoardStore {
         chatReplyTask?.cancel()
         chatReplyTask = Task { [weak self] in
             guard let self else { return }
+            
+            // Set streaming state immediately
+            await MainActor.run {
+                self.isStreamingChatReply = true
+            }
+            
             var accumulated = ""
             var thinkingAccumulated = ""
+            
+            // BATCH UPDATE MECHANISM
+            var lastUpdateTime = Date()
+            let updateInterval: TimeInterval = 0.1  // Update UI every 100ms max
+            
+            func updateUIIfNeeded(force: Bool = false) async {
+                let now = Date()
+                let shouldUpdate = force || now.timeIntervalSince(lastUpdateTime) >= updateInterval
+                
+                guard shouldUpdate else { return }
+                
+                lastUpdateTime = now
+                await MainActor.run {
+                    self.updateChatMessageText(id: assistantMessageID, text: accumulated)
+                    if !thinkingAccumulated.isEmpty {
+                        self.chatThinkingText = thinkingAccumulated
+                    }
+                    if self.chatActivityStatus != nil {
+                        self.chatActivityStatus = nil
+                    }
+                }
+            }
+            
             do {
                 var conversation = requestMessages
                 var toolRoundTrips = 0
@@ -3656,27 +3977,18 @@ extension BoardStore {
                         messages: conversation,
                         includeSystemPrompt: false
                     ) { chunk in
-                        // Normal assistant content streaming
+                        // Accumulate content WITHOUT immediately updating UI
                         let delta = chunk.message?.content ?? ""
                         if !delta.isEmpty {
                             accumulated += delta
-                            await MainActor.run {
-                                self.updateChatMessageText(id: assistantMessageID, text: accumulated)
-                                if self.chatActivityStatus != nil {
-                                    self.chatActivityStatus = nil
-                                }
-                            }
+                            await updateUIIfNeeded(force: false)  // Batched update
                         }
 
-                        // Thinking streaming
                         if let thinking = chunk.message?.thinking ?? chunk.thinking {
                             thinkingAccumulated += thinking
-                            await MainActor.run {
-                                self.chatThinkingText = thinkingAccumulated
-                            }
+                            await updateUIIfNeeded(force: false)  // Batched update
                         }
 
-                        // Tool call capture
                         if let tc = chunk.toolCall {
                             capturedToolCall = tc
                             await MainActor.run {
@@ -3684,8 +3996,10 @@ extension BoardStore {
                             }
                         }
                     }
+                    
+                    // Force final update after stream completes
+                    await updateUIIfNeeded(force: true)
 
-                    // If no tool call happened, we're done.
                     guard let toolCall = capturedToolCall else { break }
 
                     toolRoundTrips += 1
@@ -3699,10 +4013,7 @@ extension BoardStore {
                         break
                     }
 
-                    // Execute tool
                     let result = await ToolExecutor.execute(toolCall)
-
-                    // Feed tool result back into the model (your service already formats Tool Results into content)
                     conversation.append(
                         OllamaChatService.Message(
                             role: "user",
@@ -3726,6 +4037,7 @@ extension BoardStore {
 
     @MainActor
     private func finishChatReply(canceled: Bool = false) {
+        isStreamingChatReply = false
         pendingChatReplies = 0
         chatActivityStatus = nil
         // Don't clear chatThinkingText - keep it available to view
@@ -3806,6 +4118,77 @@ extension BoardStore {
             roleLabel = "Assistant"
         }
         return "\(roleLabel): \(body)"
+    }
+
+    private nonisolated static func chatTitleContext(
+        summaries: [String],
+        messages: [ChatMsg],
+        tailCount: Int
+    ) -> String {
+        var sections: [String] = []
+        if !summaries.isEmpty {
+            sections.append("Summaries:\n" + summaries.joined(separator: "\n"))
+        }
+        let recentMessages = Array(messages.suffix(tailCount))
+        if !recentMessages.isEmpty {
+            let lines = recentMessages.map { messageEntryLine($0) }
+            sections.append("Recent messages:\n" + lines.joined(separator: "\n"))
+        }
+        if sections.isEmpty {
+            return "Recent messages:\n"
+        }
+        return sections.joined(separator: "\n\n")
+    }
+
+    private nonisolated static func generateChatTitle(
+        model: String,
+        service: OllamaChatService,
+        context: String
+    ) async -> String {
+        let systemPrompt = """
+        You create short, specific titles for chat logs.
+        Use Title Case, 3-7 words, no quotes, no trailing punctuation.
+        Output only the title.
+        """
+        let userPrompt = "Context:\n" + context
+        return await summarizeText(
+            model: model,
+            service: service,
+            systemPrompt: systemPrompt,
+            userPrompt: userPrompt
+        )
+    }
+
+    private nonisolated static func cleanChatTitle(_ raw: String) -> String {
+        let firstLine = raw.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        var cleaned = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.lowercased().hasPrefix("title:") {
+            cleaned = String(cleaned.dropFirst("title:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        cleaned = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: " .,:;!?-"))
+        if cleaned.count > BoardStore.chatTitleMaxLength {
+            cleaned = String(cleaned.prefix(BoardStore.chatTitleMaxLength))
+            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return cleaned
+    }
+
+    private nonisolated static func fallbackChatTitle(from messages: [ChatMsg]) -> String {
+        let firstUser = messages.first { message in
+            guard message.role == .user else { return false }
+            return !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let candidate = (firstUser?.text ?? messages.first?.text ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.isEmpty {
+            return ""
+        }
+        if candidate.count > BoardStore.chatTitleMaxLength {
+            return String(candidate.prefix(BoardStore.chatTitleMaxLength))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return candidate
     }
 
     @MainActor
@@ -4023,15 +4406,71 @@ extension BoardStore {
 
     @MainActor
     func editChatMessageAndResend(messageId: UUID, text: String) {
-        _ = messageId
-        _ = text
-        chatWarning = "Chat is disabled."
+        guard let index = doc.chat.messages.firstIndex(where: { $0.id == messageId }) else { return }
+        guard doc.chat.messages[index].role == .user else { return }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasAttachments = !doc.chat.messages[index].images.isEmpty || !doc.chat.messages[index].files.isEmpty
+        guard !trimmed.isEmpty || hasAttachments else {
+            chatWarning = "Message can't be empty."
+            return
+        }
+
+        stopChatReplies()
+        chatWarning = nil
+        chatThinkingText = nil
+        chatThinkingExpanded = false
+        chatActivityStatus = nil
+        doc.pendingClarification = nil
+
+        var updated = doc.chat.messages[index]
+        updated.text = trimmed
+        if let toolResults = updated.toolResults, !toolResults.isEmpty {
+            updated.toolResults = nil
+        }
+        doc.chat.messages[index] = updated
+
+        if index + 1 < doc.chat.messages.count {
+            doc.chat.messages.removeSubrange((index + 1)..<doc.chat.messages.count)
+        }
+
+        if doc.chat.summarizedMessageCount > 0 {
+            if index < doc.chat.summarizedMessageCount || doc.chat.summarizedMessageCount > doc.chat.messages.count {
+                doc.chat.contextSummaries.removeAll()
+                doc.chat.summarizedMessageCount = 0
+            }
+        }
+
+        queuedUserMessageIDs.removeAll()
+        queuedUserMessageIDs.append(messageId)
+        touch()
+        startChatReplyIfIdle()
     }
 
     @MainActor
     func retryChatReply(messageId: UUID) {
-        _ = messageId
-        chatWarning = "Chat is disabled."
+        guard let index = doc.chat.messages.firstIndex(where: { $0.id == messageId }) else { return }
+
+        stopChatReplies()
+        chatWarning = nil
+        chatThinkingText = nil
+        chatThinkingExpanded = false
+        chatActivityStatus = nil
+        doc.pendingClarification = nil
+
+        if index + 1 < doc.chat.messages.count {
+            doc.chat.messages.removeSubrange((index + 1)..<doc.chat.messages.count)
+        }
+
+        if doc.chat.summarizedMessageCount > 0 {
+            if index < doc.chat.summarizedMessageCount || doc.chat.summarizedMessageCount > doc.chat.messages.count {
+                doc.chat.contextSummaries.removeAll()
+                doc.chat.summarizedMessageCount = 0
+            }
+        }
+
+        queuedUserMessageIDs.removeAll()
+        touch()
     }
 
     @MainActor
@@ -4449,6 +4888,143 @@ extension BoardStore {
     }
 }
 
+// MARK: - Reminders Workspace
+
+extension BoardStore {
+    func ensureRemindersWorkspaceSelection() {
+        var workspace = doc.remindersWorkspace
+        workspace.normalizeSelection()
+        doc.remindersWorkspace = workspace
+    }
+
+    func addReminderChecklistList(title: String = "New List") {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseTitle = trimmed.isEmpty ? "New List" : trimmed
+        let finalTitle = uniqueReminderListTitle(baseTitle)
+        let list = ReminderChecklistList(title: finalTitle)
+        doc.remindersWorkspace.lists.append(list)
+        doc.remindersWorkspace.selectedListID = list.id
+    }
+
+    func renameReminderChecklistList(id: UUID, title: String) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == id }) else { return }
+
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseTitle = trimmed.isEmpty ? "Untitled List" : trimmed
+        let finalTitle = uniqueReminderListTitle(baseTitle, excludingID: id)
+        doc.remindersWorkspace.lists[listIndex].title = finalTitle
+    }
+
+    func deleteReminderChecklistList(id: UUID) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == id }) else { return }
+        doc.remindersWorkspace.lists.remove(at: listIndex)
+        if doc.remindersWorkspace.selectedListID == id {
+            doc.remindersWorkspace.selectedListID = doc.remindersWorkspace.lists.first?.id
+        }
+    }
+
+    func selectReminderChecklistList(id: UUID) {
+        guard doc.remindersWorkspace.lists.contains(where: { $0.id == id }) else { return }
+        doc.remindersWorkspace.selectedListID = id
+    }
+
+    func addReminderChecklistItem(listID: UUID, title: String) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == listID }) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let item = ReminderChecklistItem(title: trimmed)
+        var items = doc.remindersWorkspace.lists[listIndex].items
+
+        if let firstCompletedIndex = items.firstIndex(where: { $0.isCompleted }) {
+            items.insert(item, at: firstCompletedIndex)
+        } else {
+            items.append(item)
+        }
+
+        doc.remindersWorkspace.lists[listIndex].items = items
+    }
+
+    func renameReminderChecklistItem(listID: UUID, itemID: UUID, title: String) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == listID }) else { return }
+        guard let itemIndex = doc.remindersWorkspace.lists[listIndex].items.firstIndex(where: { $0.id == itemID }) else { return }
+
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmed.isEmpty ? "Untitled Reminder" : trimmed
+        doc.remindersWorkspace.lists[listIndex].items[itemIndex].title = finalTitle
+    }
+
+    func updateReminderChecklistItem(
+        listID: UUID,
+        itemID: UUID,
+        title: String,
+        dueAt: Double?,
+        recurrence: ReminderRecurrence?
+    ) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == listID }) else { return }
+        guard let itemIndex = doc.remindersWorkspace.lists[listIndex].items.firstIndex(where: { $0.id == itemID }) else { return }
+
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmed.isEmpty ? "Untitled Reminder" : trimmed
+
+        var item = doc.remindersWorkspace.lists[listIndex].items[itemIndex]
+        item.title = finalTitle
+        item.dueAt = dueAt
+        item.recurrence = dueAt == nil ? nil : recurrence
+        doc.remindersWorkspace.lists[listIndex].items[itemIndex] = item
+    }
+
+    func deleteReminderChecklistItem(listID: UUID, itemID: UUID) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == listID }) else { return }
+        guard let itemIndex = doc.remindersWorkspace.lists[listIndex].items.firstIndex(where: { $0.id == itemID }) else { return }
+        doc.remindersWorkspace.lists[listIndex].items.remove(at: itemIndex)
+    }
+
+    func setReminderChecklistItemCompleted(listID: UUID, itemID: UUID, isCompleted: Bool) {
+        guard let listIndex = doc.remindersWorkspace.lists.firstIndex(where: { $0.id == listID }) else { return }
+        var items = doc.remindersWorkspace.lists[listIndex].items
+        guard let itemIndex = items.firstIndex(where: { $0.id == itemID }) else { return }
+
+        var item = items.remove(at: itemIndex)
+        if item.isCompleted == isCompleted {
+            items.insert(item, at: itemIndex)
+            doc.remindersWorkspace.lists[listIndex].items = items
+            return
+        }
+
+        item.isCompleted = isCompleted
+        item.completedAt = isCompleted ? Date().timeIntervalSince1970 : nil
+
+        if isCompleted {
+            items.append(item)
+        } else if let firstCompletedIndex = items.firstIndex(where: { $0.isCompleted }) {
+            items.insert(item, at: firstCompletedIndex)
+        } else {
+            items.append(item)
+        }
+
+        doc.remindersWorkspace.lists[listIndex].items = items
+    }
+
+    private func uniqueReminderListTitle(_ base: String, excludingID: UUID? = nil) -> String {
+        let existingTitles = Set(
+            doc.remindersWorkspace.lists
+                .filter { excludingID == nil || $0.id != excludingID }
+                .map { $0.title.lowercased() }
+        )
+        guard existingTitles.contains(base.lowercased()) else { return base }
+
+        var index = 2
+        while true {
+            let candidate = "\(base) \(index)"
+            if !existingTitles.contains(candidate.lowercased()) {
+                return candidate
+            }
+            index += 1
+        }
+    }
+}
+
 // MARK: - Notes: create items + selection
 
 extension BoardStore {
@@ -4529,6 +5105,7 @@ extension BoardStore {
     @discardableResult
     private func setNoteLockedByID(noteID: UUID, locked: Bool) -> Bool {
         guard let loc = locateNote(noteID) else { return false }
+        recordUndoSnapshot(coalescingKey: "note-lock-\(noteID.uuidString)")
         let ts = nowTS
 
         if let stackIndex = loc.stackIndex {
@@ -4607,18 +5184,22 @@ extension BoardStore {
     }
 
     func addArea(title: String = "New Area") {
+        recordUndoSnapshot()
         let area = NoteArea(id: UUID(), title: title, stacks: [], notebooks: [], notes: [])
         doc.notes.areas.append(area)
         doc.notes.selection = NotesSelection(areaID: area.id, stackID: nil, notebookID: nil, sectionID: nil, noteID: nil)
     }
 
     func addQuickNote() {
-        let areaID = ensureQuickNotesAreaID()
-        addNote(areaID: areaID, stackID: nil, notebookID: nil, sectionID: nil, title: "")
+        performUndoable {
+            let areaID = ensureQuickNotesAreaID()
+            addNote(areaID: areaID, stackID: nil, notebookID: nil, sectionID: nil, title: "")
+        }
     }
 
     func addStack(areaID: UUID, title: String = "New Stack") {
         guard let aIdx = doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
+        recordUndoSnapshot()
         let stack = NoteStack(id: UUID(), title: title, notebooks: [], notes: [])
         doc.notes.areas[aIdx].stacks.append(stack)
         doc.notes.selection = NotesSelection(areaID: areaID, stackID: stack.id, notebookID: nil, sectionID: nil, noteID: nil)
@@ -4630,9 +5211,11 @@ extension BoardStore {
 
         if let stackID {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].stacks[sIdx].notebooks.append(nb)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: stackID, notebookID: nb.id, sectionID: nil, noteID: nil)
         } else {
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].notebooks.append(nb)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: nil, notebookID: nb.id, sectionID: nil, noteID: nil)
         }
@@ -4645,6 +5228,7 @@ extension BoardStore {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
             guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
 
+            recordUndoSnapshot()
             let section = NoteSection(id: UUID(), title: title, notes: [])
             doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.append(section)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: section.id, noteID: nil)
@@ -4652,6 +5236,7 @@ extension BoardStore {
         }
 
         guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+        recordUndoSnapshot()
         let section = NoteSection(id: UUID(), title: title, notes: [])
         doc.notes.areas[aIdx].notebooks[nbIdx].sections.append(section)
         doc.notes.selection = NotesSelection(areaID: areaID, stackID: nil, notebookID: notebookID, sectionID: section.id, noteID: nil)
@@ -4675,6 +5260,7 @@ extension BoardStore {
             if let notebookID, let sectionID {
                 guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
                 guard let secIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+                recordUndoSnapshot()
                 doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.append(note)
                 doc.notes.selection = NotesSelection(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: sectionID, noteID: note.id)
                 return
@@ -4683,12 +5269,14 @@ extension BoardStore {
             // 2) Notebook root note (stack)
             if let notebookID {
                 guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+                recordUndoSnapshot()
                 doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.append(note)
                 doc.notes.selection = NotesSelection(areaID: areaID, stackID: stackID, notebookID: notebookID, sectionID: nil, noteID: note.id)
                 return
             }
 
             // 3) Stack root note
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].stacks[sIdx].notes.append(note)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: stackID, notebookID: nil, sectionID: nil, noteID: note.id)
             return
@@ -4698,6 +5286,7 @@ extension BoardStore {
         if let notebookID, let sectionID {
             guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             guard let secIdx = doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.append(note)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: nil, notebookID: notebookID, sectionID: sectionID, noteID: note.id)
             return
@@ -4705,11 +5294,13 @@ extension BoardStore {
 
         if let notebookID {
             guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].notebooks[nbIdx].notes.append(note)
             doc.notes.selection = NotesSelection(areaID: areaID, stackID: nil, notebookID: notebookID, sectionID: nil, noteID: note.id)
             return
         }
 
+        recordUndoSnapshot()
         doc.notes.areas[aIdx].notes.append(note)
         doc.notes.selection = NotesSelection(areaID: areaID, stackID: nil, notebookID: nil, sectionID: nil, noteID: note.id)
     }
@@ -4741,6 +5332,8 @@ extension BoardStore {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalTitle = trimmed.isEmpty ? "Untitled" : trimmed
         guard let idx = doc.notes.areas.firstIndex(where: { $0.id == id }) else { return }
+        guard doc.notes.areas[idx].title != finalTitle else { return }
+        recordUndoSnapshot(coalescingKey: "rename-area-\(id.uuidString)")
         doc.notes.areas[idx].title = finalTitle
     }
 
@@ -4749,6 +5342,7 @@ extension BoardStore {
         guard id != quickID else { return }
         guard let idx = doc.notes.areas.firstIndex(where: { $0.id == id }) else { return }
 
+        recordUndoSnapshot()
         doc.notes.areas.remove(at: idx)
 
         if doc.notes.selection.areaID == id {
@@ -4762,6 +5356,8 @@ extension BoardStore {
 
         guard let aIdx = doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
         guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
+        guard doc.notes.areas[aIdx].stacks[sIdx].title != finalTitle else { return }
+        recordUndoSnapshot(coalescingKey: "rename-stack-\(stackID.uuidString)")
         doc.notes.areas[aIdx].stacks[sIdx].title = finalTitle
     }
 
@@ -4769,6 +5365,7 @@ extension BoardStore {
         guard let aIdx = doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
         guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
 
+        recordUndoSnapshot()
         doc.notes.areas[aIdx].stacks.remove(at: sIdx)
 
         if doc.notes.selection.areaID == areaID && doc.notes.selection.stackID == stackID {
@@ -4788,11 +5385,15 @@ extension BoardStore {
         if let stackID {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
             guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+            guard doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].title != finalTitle else { return }
+            recordUndoSnapshot(coalescingKey: "rename-notebook-\(notebookID.uuidString)")
             doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].title = finalTitle
             return
         }
 
         guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+        guard doc.notes.areas[aIdx].notebooks[nbIdx].title != finalTitle else { return }
+        recordUndoSnapshot(coalescingKey: "rename-notebook-\(notebookID.uuidString)")
         doc.notes.areas[aIdx].notebooks[nbIdx].title = finalTitle
     }
 
@@ -4803,6 +5404,7 @@ extension BoardStore {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
             guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
 
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].stacks[sIdx].notebooks.remove(at: nbIdx)
 
             if doc.notes.selection.areaID == areaID &&
@@ -4816,6 +5418,7 @@ extension BoardStore {
         }
 
         guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
+        recordUndoSnapshot()
         doc.notes.areas[aIdx].notebooks.remove(at: nbIdx)
 
         if doc.notes.selection.areaID == areaID &&
@@ -4876,17 +5479,20 @@ extension BoardStore {
                 guard let fromSecIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].sections.firstIndex(where: { $0.id == fromSectionID }) else { return }
                 guard let fromNIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].sections[fromSecIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].sections[fromSecIdx].notes.remove(at: fromNIdx)
             } else if let fromNotebookID {
                 // Notebook root note (stack)
                 guard let fromNBIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks.firstIndex(where: { $0.id == fromNotebookID }) else { return }
                 guard let fromNIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].notes.remove(at: fromNIdx)
             } else {
                 // Stack root note
                 guard let fromNIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].stacks[fromSIdx].notes.remove(at: fromNIdx)
             }
         } else {
@@ -4896,17 +5502,20 @@ extension BoardStore {
                 guard let fromSecIdx = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].sections.firstIndex(where: { $0.id == fromSectionID }) else { return }
                 guard let fromNIdx = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].sections[fromSecIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].sections[fromSecIdx].notes.remove(at: fromNIdx)
             } else if let fromNotebookID {
                 // Notebook root note (area)
                 guard let fromNBIdx = doc.notes.areas[fromAIdx].notebooks.firstIndex(where: { $0.id == fromNotebookID }) else { return }
                 guard let fromNIdx = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].notes.remove(at: fromNIdx)
             } else {
                 // Area root note
                 guard let fromNIdx = doc.notes.areas[fromAIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
                 fromIndex = fromNIdx
+                recordUndoSnapshot(coalescingKey: "move-note-\(noteID.uuidString)")
                 moved = doc.notes.areas[fromAIdx].notes.remove(at: fromNIdx)
             }
         }
@@ -5005,6 +5614,7 @@ extension BoardStore {
         guard let fromIndex = doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
         if fromIndex == toIndex { return }
 
+        recordUndoSnapshot(coalescingKey: "move-area")
         let area = doc.notes.areas.remove(at: fromIndex)
         let fromIndexForAdjust = insertionAdjustmentIndex(fromIndex: fromIndex, toIndex: toIndex, sameContainer: true)
         let insertIndex = adjustedInsertIndex(fromIndex: fromIndexForAdjust, toIndex: toIndex, count: doc.notes.areas.count)
@@ -5018,6 +5628,7 @@ extension BoardStore {
 
         guard let fromAIdx = doc.notes.areas.firstIndex(where: { $0.id == fromAreaID }) else { return }
         guard let fromSIdx = doc.notes.areas[fromAIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
+        recordUndoSnapshot(coalescingKey: "move-stack-\(stackID.uuidString)")
 
         let moved = doc.notes.areas[fromAIdx].stacks.remove(at: fromSIdx)
 
@@ -5057,10 +5668,12 @@ extension BoardStore {
             guard let fromSIdx = doc.notes.areas[fromAIdx].stacks.firstIndex(where: { $0.id == fromStackID }) else { return }
             guard let nbIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             fromNBIdx = nbIdx
+            recordUndoSnapshot(coalescingKey: "move-notebook-\(notebookID.uuidString)")
             moved = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks.remove(at: nbIdx)
         } else {
             guard let nbIdx = doc.notes.areas[fromAIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             fromNBIdx = nbIdx
+            recordUndoSnapshot(coalescingKey: "move-notebook-\(notebookID.uuidString)")
             moved = doc.notes.areas[fromAIdx].notebooks.remove(at: nbIdx)
         }
 
@@ -5118,11 +5731,13 @@ extension BoardStore {
             guard let fromNBIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks.firstIndex(where: { $0.id == fromNotebookID }) else { return }
             guard let secIdx = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
             fromSecIdx = secIdx
+            recordUndoSnapshot(coalescingKey: "move-section-\(sectionID.uuidString)")
             moved = doc.notes.areas[fromAIdx].stacks[fromSIdx].notebooks[fromNBIdx].sections.remove(at: secIdx)
         } else {
             guard let fromNBIdx = doc.notes.areas[fromAIdx].notebooks.firstIndex(where: { $0.id == fromNotebookID }) else { return }
             guard let secIdx = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
             fromSecIdx = secIdx
+            recordUndoSnapshot(coalescingKey: "move-section-\(sectionID.uuidString)")
             moved = doc.notes.areas[fromAIdx].notebooks[fromNBIdx].sections.remove(at: secIdx)
         }
 
@@ -5279,12 +5894,16 @@ extension BoardStore {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
             guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             guard let secIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+            guard doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].title != finalTitle else { return }
+            recordUndoSnapshot(coalescingKey: "rename-section-\(sectionID.uuidString)")
             doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].title = finalTitle
             return
         }
 
         guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
         guard let secIdx = doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+        guard doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].title != finalTitle else { return }
+        recordUndoSnapshot(coalescingKey: "rename-section-\(sectionID.uuidString)")
         doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].title = finalTitle
     }
 
@@ -5295,6 +5914,7 @@ extension BoardStore {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
             guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             guard let secIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.remove(at: secIdx)
 
             if doc.notes.selection.areaID == areaID &&
@@ -5309,6 +5929,7 @@ extension BoardStore {
 
         guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
         guard let secIdx = doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
+        recordUndoSnapshot()
         doc.notes.areas[aIdx].notebooks[nbIdx].sections.remove(at: secIdx)
 
         if doc.notes.selection.areaID == areaID &&
@@ -5332,6 +5953,7 @@ extension BoardStore {
                 guard let secIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
                 guard let nIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
+                recordUndoSnapshot()
                 doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.remove(at: nIdx)
 
                 if doc.notes.selection.areaID == areaID,
@@ -5349,6 +5971,7 @@ extension BoardStore {
                 guard let nbIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
                 guard let nIdx = doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
+                recordUndoSnapshot()
                 doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.remove(at: nIdx)
 
                 if doc.notes.selection.areaID == areaID,
@@ -5363,6 +5986,7 @@ extension BoardStore {
 
             // 3) Stack root note
             guard let nIdx = doc.notes.areas[aIdx].stacks[sIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].stacks[sIdx].notes.remove(at: nIdx)
 
             if doc.notes.selection.areaID == areaID,
@@ -5381,6 +6005,7 @@ extension BoardStore {
             guard let secIdx = doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == sectionID }) else { return }
             guard let nIdx = doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.remove(at: nIdx)
 
             if doc.notes.selection.areaID == areaID,
@@ -5397,6 +6022,7 @@ extension BoardStore {
             guard let nbIdx = doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == notebookID }) else { return }
             guard let nIdx = doc.notes.areas[aIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
 
+            recordUndoSnapshot()
             doc.notes.areas[aIdx].notebooks[nbIdx].notes.remove(at: nIdx)
 
             if doc.notes.selection.areaID == areaID,
@@ -5410,6 +6036,7 @@ extension BoardStore {
         }
 
         guard let nIdx = doc.notes.areas[aIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
+        recordUndoSnapshot()
         doc.notes.areas[aIdx].notes.remove(at: nIdx)
 
         if doc.notes.selection.areaID == areaID,
@@ -5546,6 +6173,7 @@ extension BoardStore {
         let note = NoteItem(id: UUID(), title: title, body: body, createdAt: ts, updatedAt: ts)
 
         guard let aIdx = doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return nil }
+        recordUndoSnapshot()
 
         if let stackID {
             guard let sIdx = doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return nil }
@@ -5584,8 +6212,10 @@ extension BoardStore {
     }
 
     @discardableResult
-    func updateNote(noteID: UUID, title: String?, body: String?) -> Bool {
+    func updateNote(noteID: UUID, title: String?, body: String?, undoCoalescingKey: String? = nil) -> Bool {
         guard let loc = locateNote(noteID) else { return false }
+        if title == nil, body == nil { return false }
+        recordUndoSnapshot(coalescingKey: undoCoalescingKey ?? "note-\(noteID.uuidString)")
         let ts = nowTS
 
         if let stackIndex = loc.stackIndex {
@@ -5928,8 +6558,7 @@ extension BoardStore {
                 if let toolCall = detectedToolCall {
                     await self.handleAsyncToolCall(
                         toolCall: toolCall,
-                        assistantMessageID: assistantMessageID,
-                        previousMessages: requestMessages
+                        assistantMessageID: assistantMessageID
                     )
                 } else {
                     await MainActor.run {
@@ -5999,169 +6628,348 @@ extension BoardStore {
     /// Handle tool execution asynchronously with immediate user feedback
     private func handleAsyncToolCall(
         toolCall: ToolCall,
-        assistantMessageID: UUID,
-        previousMessages: [OllamaChatService.Message]
+        assistantMessageID: UUID
     ) async {
-        // Extract the acknowledgment message from tool arguments
         let acknowledgment = toolCall.arguments["acknowledgment"] ?? "Let me look that up for you"
-        
-        // Immediately show the acknowledgment to the user
+
         await MainActor.run {
             self.updateChatMessageText(id: assistantMessageID, text: acknowledgment)
-            self.chatActivityStatus = "Searching..."
-        }
-        
-        // Kick off the search in the background
-        Task {
-            let toolResult = await ToolExecutor.execute(toolCall)
-            
-            // Once search completes, continue the conversation with results
-            await self.processToolResults(
-                toolResult: toolResult,
-                toolCall: toolCall,
-                assistantMessageID: assistantMessageID,
-                previousMessages: previousMessages,
-                acknowledgmentText: acknowledgment
-            )
-        }
-    }
-    
-    // MARK: - Process Tool Results
-    
-    /// Process the results from an async tool execution
-    private func processToolResults(
-        toolResult: ToolResponse,
-        toolCall: ToolCall,
-        assistantMessageID: UUID,
-        previousMessages: [OllamaChatService.Message],
-        acknowledgmentText: String
-    ) async {
-        func finishWithFailure(_ message: String) async {
-            await MainActor.run {
-                self.updateChatMessageText(id: assistantMessageID, text: message)
-                self.chatActivityStatus = nil
-                self.finishChatReply()
-            }
-        }
-
-        guard toolResult.success else {
-            let errorMessage: String
-            if let error = toolResult.error, error.contains("No internet connection") {
-                errorMessage = acknowledgmentText + "\n\nI'm sorry, but I cannot perform a search right now because there's no internet connection available."
-            } else {
-                errorMessage = acknowledgmentText + "\n\nI encountered an error while searching: \(toolResult.error ?? "Unknown error")"
-            }
-            await finishWithFailure(errorMessage)
-            return
         }
 
         await MainActor.run {
-            self.chatActivityStatus = "Processing results..."
+            self.launchBackgroundSearch(toolCall: toolCall, assistantMessageID: assistantMessageID)
+            self.finishChatReply()
         }
+    }
 
-        var conversation = previousMessages
-        if !acknowledgmentText.isEmpty {
-            conversation.append(
-                OllamaChatService.Message(
-                    role: "assistant",
-                    content: acknowledgmentText
-                )
-            )
-        }
-        conversation.append(
-            OllamaChatService.Message(
-                role: "system",
-                content: makeToolContextMessage(acknowledgment: acknowledgmentText, toolCall: toolCall),
-                toolResults: [toolResult]
-            )
-        )
+    @MainActor
+    private func launchBackgroundSearch(toolCall: ToolCall, assistantMessageID: UUID) {
+        let threadID = doc.chat.id
+        let query = toolCall.arguments["query"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let originalRequest = originalSearchRequestText(forAssistantMessageID: assistantMessageID)
+        let toolCallID = toolCall.id
+        let toolCallName = toolCall.name
+        let toolCallArguments = toolCall.arguments
+        let workerModel = backgroundSearchModelName
+        let primaryModel = chatModelName
+        let systemPrompt = systemMessageForChat().content
 
-        var finalResponse = acknowledgmentText + "\n\n"
-        var thinkingAccumulated = ""
-
-        func runAnswerPass(extraSystemMessage: String?) async throws -> Bool {
-            if let extraSystemMessage {
-                conversation.append(
-                    OllamaChatService.Message(
-                        role: "system",
-                        content: extraSystemMessage
-                    )
-                )
+        // Detached so the search pipeline keeps running even if foreground chat starts another reply.
+        let task = Task.detached(priority: .utility) { [weak self] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.backgroundSearchTasks.removeValue(forKey: assistantMessageID)
+                }
             }
 
-            var detectedToolCall = false
-            var detectionBuffer = ""
-            var passDelta = ""
+            guard let self else { return }
+            let detachedToolCall = ToolCall(
+                id: toolCallID,
+                name: toolCallName,
+                arguments: toolCallArguments
+            )
+            let toolResult = await ToolExecutor.execute(detachedToolCall)
 
-            try await self.chatService.stream(
-                model: self.chatModelName,
-                messages: conversation,
-                includeSystemPrompt: false,
-                includeTools: false
-            ) { chunk in
-                if let thinking = chunk.message?.thinking ?? chunk.thinking {
-                    thinkingAccumulated += thinking
-                    await MainActor.run {
-                        self.chatThinkingText = thinkingAccumulated
-                    }
+            guard toolResult.success else {
+                let failure = Self.searchFailureMessage(
+                    query: query,
+                    originalRequest: originalRequest,
+                    error: toolResult.error
+                )
+                await MainActor.run {
+                    self.postBackgroundSearchResponse(text: failure, threadID: threadID)
+                }
+                return
+            }
+
+            do {
+                let findings = try await Self.generateBackgroundSearchFindings(
+                    model: workerModel,
+                    query: query,
+                    originalRequest: originalRequest,
+                    rawSearchResults: toolResult.result
+                )
+
+                guard let streamedMessageID = await MainActor.run(body: {
+                    self.createBackgroundSearchFollowUpMessage(threadID: threadID)
+                }) else {
+                    return
                 }
 
-                if chunk.toolCall != nil {
-                    detectedToolCall = true
-                }
+                let streamMessages = Self.makePrimarySearchFollowUpMessages(
+                    systemPrompt: systemPrompt,
+                    query: query,
+                    originalRequest: originalRequest,
+                    analystFindings: findings
+                )
 
-                let delta = chunk.message?.content ?? ""
-                if !delta.isEmpty {
-                    detectionBuffer += delta
-                    if detectionBuffer.count > 4096 {
-                        detectionBuffer = String(detectionBuffer.suffix(4096))
-                    }
-
-                    if !detectedToolCall,
-                       let _ = self.extractToolCall(from: detectionBuffer) {
-                        detectedToolCall = true
-                    }
-
-                    if !self.looksLikeToolCall(detectionBuffer) {
-                        passDelta += delta
-                        finalResponse += delta
+                do {
+                    let streamedText = try await Self.streamModelResponse(
+                        model: primaryModel,
+                        messages: streamMessages
+                    ) { accumulatedText in
                         await MainActor.run {
-                            self.updateChatMessageText(id: assistantMessageID, text: finalResponse)
-                            if self.chatActivityStatus != nil {
-                                self.chatActivityStatus = nil
-                            }
+                            self.updateBackgroundSearchMessage(
+                                id: streamedMessageID,
+                                text: accumulatedText,
+                                threadID: threadID
+                            )
                         }
                     }
+
+                    if streamedText.isEmpty {
+                        let fallback = Self.fallbackSearchMessage(
+                            query: query,
+                            originalRequest: originalRequest,
+                            toolResult: toolResult
+                        )
+                        await MainActor.run {
+                            self.updateBackgroundSearchMessage(
+                                id: streamedMessageID,
+                                text: fallback,
+                                threadID: threadID
+                            )
+                        }
+                    }
+                } catch {
+                    let fallback = Self.fallbackSearchMessage(
+                        query: query,
+                        originalRequest: originalRequest,
+                        toolResult: toolResult
+                    )
+                    await MainActor.run {
+                        self.updateBackgroundSearchMessage(
+                            id: streamedMessageID,
+                            text: fallback,
+                            threadID: threadID
+                        )
+                    }
+                }
+
+                await MainActor.run {
+                    if self.doc.chat.id == threadID, !self.doc.ui.panels.chat.isOpen {
+                        self.chatNeedsAttention = true
+                    }
+                }
+            } catch {
+                let fallback = Self.fallbackSearchMessage(
+                    query: query,
+                    originalRequest: originalRequest,
+                    toolResult: toolResult
+                )
+                await MainActor.run {
+                    self.postBackgroundSearchResponse(text: fallback, threadID: threadID)
                 }
             }
-
-            if !passDelta.isEmpty {
-                conversation.append(
-                    OllamaChatService.Message(
-                        role: "assistant",
-                        content: passDelta
-                    )
-                )
-            }
-
-            return detectedToolCall && passDelta.isEmpty
         }
 
-        do {
-            let needsRetry = try await runAnswerPass(extraSystemMessage: nil)
-            if needsRetry {
-                _ = try await runAnswerPass(
-                    extraSystemMessage: "Tool calls are disabled for this response. Answer directly using the provided search results."
-                )
-            }
+        backgroundSearchTasks[assistantMessageID] = task
+    }
 
-            await MainActor.run {
-                self.finishChatReply()
+    private nonisolated static func collectModelResponse(
+        model: String,
+        messages: [OllamaChatService.Message]
+    ) async throws -> String {
+        try await streamModelResponse(model: model, messages: messages) { _ in }
+    }
+
+    private nonisolated static func streamModelResponse(
+        model: String,
+        messages: [OllamaChatService.Message],
+        onAccumulated: @escaping (String) async -> Void
+    ) async throws -> String {
+        let service = OllamaChatService()
+        var text = ""
+        try await service.stream(
+            model: model,
+            messages: messages,
+            includeSystemPrompt: false,
+            includeTools: false
+        ) { chunk in
+            let delta = chunk.message?.content ?? ""
+            if !delta.isEmpty {
+                text += delta
+                await onAccumulated(text)
             }
-        } catch {
-            await MainActor.run {
-                self.handleChatReplyError(for: assistantMessageID, error: error)
-            }
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func generateBackgroundSearchFindings(
+        model: String,
+        query: String,
+        originalRequest: String,
+        rawSearchResults: String
+    ) async throws -> String {
+        let queryLine = query.isEmpty ? "(not provided)" : query
+        let originalRequestLine = originalRequest.isEmpty ? "(not provided)" : originalRequest
+        let messages = [
+            OllamaChatService.Message(
+                role: "system",
+                content: """
+                You are a background search analyst.
+                Use only the provided search results.
+                Summarize the most relevant facts, flag uncertainty, and include source URLs.
+                Keep the output concise and factual.
+                """
+            ),
+            OllamaChatService.Message(
+                role: "user",
+                content: """
+                Original user request:
+                \(originalRequestLine)
+
+                Search query:
+                \(queryLine)
+
+                Raw search results:
+                \(rawSearchResults)
+
+                Write concise findings for a primary assistant.
+                """
+            )
+        ]
+
+        let findings = try await collectModelResponse(model: model, messages: messages)
+        if findings.isEmpty {
+            throw NSError(
+                domain: "BoardStoreBackgroundSearch",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Background analysis returned no content."]
+            )
+        }
+        return findings
+    }
+
+    private nonisolated static func makePrimarySearchFollowUpMessages(
+        systemPrompt: String,
+        query: String,
+        originalRequest: String,
+        analystFindings: String
+    ) -> [OllamaChatService.Message] {
+        let queryLine = query.isEmpty ? "(not provided)" : query
+        let originalRequestLine = originalRequest.isEmpty ? "(not provided)" : originalRequest
+        return [
+            OllamaChatService.Message(
+                role: "system",
+                content: systemPrompt
+            ),
+            OllamaChatService.Message(
+                role: "system",
+                content: """
+                Search results for an earlier user request just finished in the background while the chat continued.
+                Respond as a natural follow-up to that earlier request.
+                Start with a callback phrase such as "I've got those results from earlier..." or
+                "The search for <topic> just came back...".
+                Then answer the original request directly, using only the analyst findings below.
+                Do not mention hidden tools or internal workflow.
+                """
+            ),
+            OllamaChatService.Message(
+                role: "user",
+                content: """
+                Earlier user request:
+                \(originalRequestLine)
+
+                Earlier user search request:
+                \(queryLine)
+
+                Analyst findings:
+                \(analystFindings)
+
+                Write the final user-facing answer.
+                """
+            )
+        ]
+    }
+
+    private nonisolated static func followUpPrefix(query: String, originalRequest: String) -> String {
+        if !query.isEmpty {
+            return "The search for \"\(query)\" just came back."
+        }
+        if !originalRequest.isEmpty {
+            return "I've got those results from earlier about \"\(originalRequest)\"."
+        }
+        return "I've got those results from earlier."
+    }
+
+    private nonisolated static func fallbackSearchMessage(
+        query: String,
+        originalRequest: String,
+        toolResult: ToolResponse
+    ) -> String {
+        let heading = followUpPrefix(query: query, originalRequest: originalRequest)
+        let raw = toolResult.result.trimmingCharacters(in: .whitespacesAndNewlines)
+        let preview = String(raw.prefix(1200))
+        if preview.isEmpty {
+            return "\(heading)\n\nI finished the search, but I couldn't format a final summary."
+        }
+        return "\(heading)\n\nI hit a problem while drafting the final summary, so here's the raw result output:\n\n\(preview)"
+    }
+
+    private nonisolated static func searchFailureMessage(
+        query: String,
+        originalRequest: String,
+        error: String?
+    ) -> String {
+        let prefix = followUpPrefix(query: query, originalRequest: originalRequest)
+        let detail = error ?? "Unknown error"
+        if detail.contains("No internet connection") {
+            return "\(prefix)\n\nI couldn't complete it because there's no internet connection."
+        }
+        return "\(prefix)\n\nI ran into an error while searching: \(detail)"
+    }
+
+    @MainActor
+    private func originalSearchRequestText(forAssistantMessageID assistantMessageID: UUID) -> String {
+        guard let assistantIndex = doc.chat.messages.firstIndex(where: { $0.id == assistantMessageID }),
+              assistantIndex > 0 else {
+            return ""
+        }
+        let userMessage = doc.chat.messages[assistantIndex - 1]
+        guard userMessage.role == .user else { return "" }
+        return userMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @MainActor
+    private func createBackgroundSearchFollowUpMessage(threadID: UUID) -> UUID? {
+        guard doc.chat.id == threadID else { return nil }
+        let messageID = UUID()
+        let message = ChatMsg(
+            id: messageID,
+            role: .assistant,
+            text: "",
+            images: [],
+            files: [],
+            ts: Date().timeIntervalSince1970
+        )
+        doc.chat.messages.append(message)
+        touch()
+        return messageID
+    }
+
+    @MainActor
+    private func updateBackgroundSearchMessage(id: UUID, text: String, threadID: UUID) {
+        guard doc.chat.id == threadID else { return }
+        updateChatMessageText(id: id, text: text)
+    }
+
+    @MainActor
+    private func postBackgroundSearchResponse(text: String, threadID: UUID) {
+        guard doc.chat.id == threadID else { return }
+        let message = ChatMsg(
+            id: UUID(),
+            role: .assistant,
+            text: text,
+            images: [],
+            files: [],
+            ts: Date().timeIntervalSince1970
+        )
+        doc.chat.messages.append(message)
+        touch()
+
+        if !doc.ui.panels.chat.isOpen {
+            chatNeedsAttention = true
         }
     }
     
@@ -6197,19 +7005,5 @@ extension BoardStore {
     private func looksLikeToolCall(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("{") && trimmed.contains("\"tool_call\"")
-    }
-
-    /// Builds a contextual system prompt for the model based on the tool call
-    private func makeToolContextMessage(acknowledgment: String, toolCall: ToolCall) -> String {
-        """
-        SEARCH RESULTS CONTEXT:
-        You previously told the user: "\(acknowledgment)"
-
-        Tool "\(toolCall.name)" (id: \(toolCall.id)) returned the search results below.
-        Continue naturally from your prior reply using the information provided.
-        Do NOT repeat yourself or restart the conversation.
-
-        Search results are below:
-        """
     }
 }

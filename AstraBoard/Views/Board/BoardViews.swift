@@ -7,12 +7,27 @@ import UniformTypeIdentifiers
 struct WorkspaceModeSwitcher: View {
     @Binding var mode: WorkspaceMode
 
+    private var modeIcon: String {
+        switch mode {
+        case .canvas:
+            return "square.grid.2x2"
+        case .notes:
+            return "text.page"
+        case .reminders:
+            return "checklist"
+        case .calendar:
+            return "calendar"
+        }
+    }
+
     var body: some View {
         Menu {
             Button { mode = .canvas } label: { Label("Canvas", systemImage: "square.grid.2x2") }
             Button { mode = .notes }  label: { Label("Notes", systemImage: "text.page") }
+            Button { mode = .reminders } label: { Label("Reminders", systemImage: "checklist") }
+            Button { mode = .calendar } label: { Label("Calendar", systemImage: "calendar") }
         } label: {
-            Image(systemName: mode == .canvas ? "square.grid.2x2" : "text.page")
+            Image(systemName: modeIcon)
                 .font(.system(size: 14, weight: .semibold))
                 .frame(width: 28, height: 28)
                 .background(
@@ -29,6 +44,1426 @@ struct WorkspaceModeSwitcher: View {
     }
 }
 
+struct RemindersWorkspaceView: View {
+    @EnvironmentObject var store: BoardStore
+    @State private var newItemTitle: String = ""
+
+    private var selectedList: ReminderChecklistList? {
+        let workspace = store.doc.remindersWorkspace
+        if let selected = workspace.selectedListID,
+           let list = workspace.lists.first(where: { $0.id == selected }) {
+            return list
+        }
+        return workspace.lists.first
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+            Divider()
+            main
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .onAppear {
+            store.ensureRemindersWorkspaceSelection()
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                WorkspaceModeSwitcher(mode: Binding(
+                    get: { store.doc.ui.workspaceMode },
+                    set: { store.setWorkspaceMode($0) }
+                ))
+
+                Spacer()
+
+                Button {
+                    store.addReminderChecklistList()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .help("New list")
+            }
+            .padding(10)
+
+            Divider()
+
+            if store.doc.remindersWorkspace.lists.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No lists yet")
+                        .foregroundColor(.secondary)
+                    Button("Create List") {
+                        store.addReminderChecklistList()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(16)
+            } else {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(store.doc.remindersWorkspace.lists) { list in
+                            remindersListRow(list)
+                        }
+                    }
+                    .padding(10)
+                }
+            }
+        }
+        .frame(width: 260)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.55))
+    }
+
+    private func remindersListRow(_ list: ReminderChecklistList) -> some View {
+        let isSelected = selectedList?.id == list.id
+        let openCount = list.items.filter { !$0.isCompleted }.count
+
+        return HStack(spacing: 6) {
+            Button {
+                store.selectReminderChecklistList(id: list.id)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "list.bullet")
+                        .frame(width: 16)
+                    Text(list.title)
+                        .lineLimit(1)
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer(minLength: 4)
+                    Text("\(openCount)")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 7)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(isSelected ? Color(NSColor.selectedContentBackgroundColor).opacity(0.3) : Color.clear)
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button(role: .destructive) {
+                store.deleteReminderChecklistList(id: list.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("Delete list")
+        }
+        .contextMenu {
+            Button("Rename List") {
+                promptRenameList(current: list.title) { newTitle in
+                    store.renameReminderChecklistList(id: list.id, title: newTitle)
+                }
+            }
+
+            Button("Delete List", role: .destructive) {
+                store.deleteReminderChecklistList(id: list.id)
+            }
+        }
+    }
+
+    private var main: some View {
+        Group {
+            if let list = selectedList {
+                remindersListDetail(list)
+            } else {
+                VStack(spacing: 12) {
+                    Text("Select a list")
+                        .foregroundColor(.secondary)
+                    Button("Create List") {
+                        store.addReminderChecklistList()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(NSColor.textBackgroundColor).opacity(0.55))
+    }
+
+    private func remindersListDetail(_ list: ReminderChecklistList) -> some View {
+        let openCount = list.items.filter { !$0.isCompleted }.count
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(list.title)
+                    .font(.system(size: 30, weight: .bold))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(openCount) remaining")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+
+            HStack(spacing: 10) {
+                TextField("Add a reminder", text: $newItemTitle)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addItem(to: list.id) }
+
+                Button("Add") { addItem(to: list.id) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newItemTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if list.items.isEmpty {
+                VStack {
+                    Spacer()
+                    Text("No reminders in this list")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
+                        ForEach(list.items) { item in
+                            reminderItemRow(listID: list.id, item: item)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 14)
+                }
+            }
+        }
+    }
+
+    private func reminderItemRow(listID: UUID, item: ReminderChecklistItem) -> some View {
+        HStack(spacing: 10) {
+            Button {
+                store.setReminderChecklistItemCompleted(
+                    listID: listID,
+                    itemID: item.id,
+                    isCompleted: !item.isCompleted
+                )
+            } label: {
+                Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(item.isCompleted ? .green : .secondary)
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(item.isCompleted ? .secondary : .primary)
+                    .strikethrough(item.isCompleted, color: .secondary)
+                    .lineLimit(2)
+
+                if let schedule = reminderScheduleText(item: item) {
+                    Text(schedule)
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            Button(role: .destructive) {
+                store.deleteReminderChecklistItem(listID: listID, itemID: item.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("Delete reminder")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.85))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color(NSColor.separatorColor).opacity(0.8), lineWidth: 1)
+        )
+        .contextMenu {
+            Button("Edit Reminder") {
+                promptEditReminder(item: item) { newTitle, dueAt, recurrence in
+                    store.updateReminderChecklistItem(
+                        listID: listID,
+                        itemID: item.id,
+                        title: newTitle,
+                        dueAt: dueAt,
+                        recurrence: recurrence
+                    )
+                }
+            }
+
+            Button(item.isCompleted ? "Mark Incomplete" : "Mark Complete") {
+                store.setReminderChecklistItemCompleted(
+                    listID: listID,
+                    itemID: item.id,
+                    isCompleted: !item.isCompleted
+                )
+            }
+
+            Button("Delete Reminder", role: .destructive) {
+                store.deleteReminderChecklistItem(listID: listID, itemID: item.id)
+            }
+        }
+    }
+
+    private func addItem(to listID: UUID) {
+        store.addReminderChecklistItem(listID: listID, title: newItemTitle)
+        newItemTitle = ""
+    }
+
+    private func promptRenameList(current: String, onSave: @escaping (String) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = "Rename List"
+        alert.informativeText = "Enter a new list name."
+        alert.alertStyle = .informational
+
+        let field = NSTextField(string: current)
+        field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        field.usesSingleLineMode = true
+        field.maximumNumberOfLines = 1
+        alert.accessoryView = field
+
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        onSave(field.stringValue)
+    }
+
+    private func promptEditReminder(
+        item: ReminderChecklistItem,
+        onSave: @escaping (String, Double?, ReminderRecurrence?) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Edit Reminder"
+        alert.informativeText = ""
+        alert.alertStyle = .informational
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 198))
+
+        let titleLabel = NSTextField(labelWithString: "Reminder")
+        titleLabel.frame = NSRect(x: 0, y: 176, width: 360, height: 16)
+
+        let titleField = NSTextField(string: item.title)
+        titleField.frame = NSRect(x: 0, y: 148, width: 360, height: 24)
+        titleField.usesSingleLineMode = true
+        titleField.maximumNumberOfLines = 1
+
+        let scheduleToggle = NSButton(checkboxWithTitle: "Set date and time", target: nil, action: nil)
+        scheduleToggle.frame = NSRect(x: 0, y: 118, width: 220, height: 20)
+        let hasSchedule = item.dueAt != nil
+        scheduleToggle.state = hasSchedule ? .on : .off
+
+        let whenLabel = NSTextField(labelWithString: "When")
+        whenLabel.frame = NSRect(x: 0, y: 92, width: 360, height: 16)
+
+        let datePicker = NSDatePicker()
+        datePicker.datePickerStyle = .textFieldAndStepper
+        datePicker.datePickerElements = [.yearMonthDay, .hourMinute]
+        datePicker.dateValue = item.dueAt
+            .map { Date(timeIntervalSince1970: $0) }
+            ?? Date().addingTimeInterval(3600)
+        datePicker.frame = NSRect(x: 0, y: 62, width: 280, height: 24)
+
+        let recurrenceLabel = NSTextField(labelWithString: "Repeat")
+        recurrenceLabel.frame = NSRect(x: 0, y: 36, width: 360, height: 16)
+
+        let recurrencePopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 180, height: 26), pullsDown: false)
+        recurrencePopup.frame = NSRect(x: 0, y: 8, width: 280, height: 26)
+        recurrencePopup.addItems(withTitles: [
+            "Does Not Repeat",
+            "Hourly",
+            "Daily",
+            "Weekly",
+            "Monthly",
+            "Yearly"
+        ])
+        recurrencePopup.selectItem(at: reminderRecurrenceSelectionIndex(item.recurrence))
+
+        accessory.addSubview(titleLabel)
+        accessory.addSubview(titleField)
+        accessory.addSubview(scheduleToggle)
+        accessory.addSubview(whenLabel)
+        accessory.addSubview(datePicker)
+        accessory.addSubview(recurrenceLabel)
+        accessory.addSubview(recurrencePopup)
+
+        alert.accessoryView = accessory
+
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let shouldSchedule = scheduleToggle.state == .on
+        let dueAt = shouldSchedule ? datePicker.dateValue.timeIntervalSince1970 : nil
+        let recurrence = shouldSchedule ? reminderRecurrence(fromSelectionIndex: recurrencePopup.indexOfSelectedItem) : nil
+        onSave(titleField.stringValue, dueAt, recurrence)
+    }
+
+    private func reminderRecurrenceSelectionIndex(_ recurrence: ReminderRecurrence?) -> Int {
+        guard let recurrence else { return 0 }
+        switch recurrence.frequency {
+        case .hourly: return 1
+        case .daily: return 2
+        case .weekly: return 3
+        case .monthly: return 4
+        case .yearly: return 5
+        }
+    }
+
+    private func reminderRecurrence(fromSelectionIndex index: Int) -> ReminderRecurrence? {
+        switch index {
+        case 1:
+            return ReminderRecurrence(frequency: .hourly, interval: 1)
+        case 2:
+            return ReminderRecurrence(frequency: .daily, interval: 1)
+        case 3:
+            return ReminderRecurrence(frequency: .weekly, interval: 1)
+        case 4:
+            return ReminderRecurrence(frequency: .monthly, interval: 1)
+        case 5:
+            return ReminderRecurrence(frequency: .yearly, interval: 1)
+        default:
+            return nil
+        }
+    }
+
+    private func reminderScheduleText(item: ReminderChecklistItem) -> String? {
+        guard let dueAt = item.dueAt else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        var text = formatter.string(from: Date(timeIntervalSince1970: dueAt))
+
+        if let recurrence = item.recurrence {
+            text += " · Repeats \(recurrence.frequency.rawValue.capitalized)"
+        }
+
+        return text
+    }
+}
+
+struct CalendarWorkspaceView: View {
+    @EnvironmentObject var store: BoardStore
+    @State private var visiblePeriodID: Int?
+    @State private var pagerDragOffset: CGFloat = 0
+    @State private var horizontalScrollAccumulator: CGFloat = 0
+    @State private var lastWheelPageChangeTime: TimeInterval = 0
+    @State private var isEventEditorPresented: Bool = false
+    @State private var editingEventID: UUID?
+    @State private var eventEditorDraft = CalendarEventEditorDraft()
+
+    private let periodWindowRadius: Int = 1
+    private let referenceYear: Int = 1970
+    private let wheelPageThreshold: CGFloat = 180
+    private let wheelPageCooldown: TimeInterval = 0.28
+
+    private enum RecurrenceChoice: String, CaseIterable, Identifiable {
+        case none
+        case daily
+        case weekly
+        case monthly
+        case yearly
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: return "None"
+            case .daily: return "Daily"
+            case .weekly: return "Weekly"
+            case .monthly: return "Monthly"
+            case .yearly: return "Yearly"
+            }
+        }
+    }
+
+    private struct CalendarEventEditorDraft {
+        var title: String = "New Event"
+        var start: Date = Date()
+        var lengthMinutes: Int = 60
+        var recurrence: RecurrenceChoice = .none
+        var recurrenceInterval: Int = 1
+    }
+
+    private struct CalendarEventOccurrence: Identifiable {
+        var sourceID: UUID
+        var title: String
+        var start: Date
+        var end: Date
+
+        var id: String {
+            "\(sourceID.uuidString)-\(Int(start.timeIntervalSince1970))"
+        }
+    }
+
+    private static let selectedDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .full
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private static let timeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "h:mm a"
+        return formatter
+    }()
+
+    private static let monthHeaderFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "LLLL yyyy"
+        return formatter
+    }()
+
+    private static let shortDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "EEE d"
+        return formatter
+    }()
+
+    private var selectedDay: Date {
+        Calendar.current.startOfDay(for: Date(timeIntervalSince1970: store.doc.calendar.selectedDate))
+    }
+
+    private var viewModeBinding: Binding<CalendarViewMode> {
+        Binding(
+            get: { store.doc.calendar.selectedView },
+            set: { store.setCalendarViewMode($0) }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            HStack(spacing: 0) {
+                timelineSidebar
+                Divider()
+                mainContent
+            }
+        }
+        .background(Color(NSColor.windowBackgroundColor))
+        .sheet(isPresented: $isEventEditorPresented) {
+            eventEditorSheet
+                .frame(minWidth: 440, minHeight: 380)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            WorkspaceModeSwitcher(mode: Binding(
+                get: { store.doc.ui.workspaceMode },
+                set: { store.setWorkspaceMode($0) }
+            ))
+
+            Spacer()
+
+            Picker("View", selection: viewModeBinding) {
+                ForEach(CalendarViewMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 420)
+        }
+        .padding(10)
+    }
+
+    private var timelineSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                presentNewEventEditor(on: selectedDay)
+            } label: {
+                Label("Add Event", systemImage: "plus")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+
+            Text(Self.selectedDayFormatter.string(from: selectedDay))
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(0..<24, id: \.self) { hour in
+                        timelineHourRow(hour)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+            }
+        }
+        .frame(width: 240)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.55))
+    }
+
+    private func timelineHourRow(_ hour: Int) -> some View {
+        let eventsInHour = events(on: selectedDay).filter {
+            Calendar.current.component(.hour, from: $0.start) == hour
+        }
+
+        return HStack(spacing: 8) {
+            Text(hourLabel(hour))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 46, alignment: .leading)
+
+            Rectangle()
+                .fill(Color(NSColor.separatorColor).opacity(0.55))
+                .frame(height: 1)
+
+            if !eventsInHour.isEmpty {
+                Text("\(eventsInHour.count)")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(
+                        Capsule().fill(Color.accentColor.opacity(0.16))
+                    )
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var eventEditorSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Event") {
+                    TextField("Title", text: $eventEditorDraft.title)
+                    DatePicker("Start", selection: $eventEditorDraft.start, displayedComponents: [.date, .hourAndMinute])
+                    Stepper(value: $eventEditorDraft.lengthMinutes, in: 5...1440, step: 5) {
+                        Text("Length: \(lengthLabel(minutes: eventEditorDraft.lengthMinutes))")
+                    }
+                }
+
+                Section("Recurrence") {
+                    Picker("Repeat", selection: $eventEditorDraft.recurrence) {
+                        ForEach(RecurrenceChoice.allCases) { choice in
+                            Text(choice.label).tag(choice)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    if eventEditorDraft.recurrence != .none {
+                        Stepper(value: $eventEditorDraft.recurrenceInterval, in: 1...30) {
+                            Text(recurrenceIntervalLabel())
+                        }
+                    }
+                }
+            }
+            .navigationTitle(editingEventID == nil ? "New Event" : "Edit Event")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        isEventEditorPresented = false
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        saveEventEditor()
+                    }
+                }
+            }
+        }
+    }
+
+    private func presentNewEventEditor(on day: Date) {
+        let start = defaultStartDate(on: day)
+        editingEventID = nil
+        eventEditorDraft = CalendarEventEditorDraft(
+            title: "New Event",
+            start: start,
+            lengthMinutes: 60,
+            recurrence: .none,
+            recurrenceInterval: 1
+        )
+        isEventEditorPresented = true
+    }
+
+    private func presentEventEditor(eventID: UUID, preferredStart: Date? = nil) {
+        guard let event = store.doc.calendar.events.first(where: { $0.id == eventID }) else { return }
+        let start = preferredStart ?? Date(timeIntervalSince1970: event.startAt)
+        let length = max(5, Int((event.endAt - event.startAt) / 60))
+
+        editingEventID = eventID
+        eventEditorDraft = CalendarEventEditorDraft(
+            title: event.title,
+            start: start,
+            lengthMinutes: length,
+            recurrence: recurrenceChoice(from: event.recurrence),
+            recurrenceInterval: max(1, event.recurrence?.interval ?? 1)
+        )
+        isEventEditorPresented = true
+    }
+
+    private func saveEventEditor() {
+        let recurrence = recurrenceFromDraft()
+        if let editingEventID {
+            store.updateCalendarEvent(
+                id: editingEventID,
+                title: eventEditorDraft.title,
+                start: eventEditorDraft.start,
+                lengthMinutes: eventEditorDraft.lengthMinutes,
+                recurrence: recurrence
+            )
+        } else {
+            store.createCalendarEvent(
+                title: eventEditorDraft.title,
+                start: eventEditorDraft.start,
+                lengthMinutes: eventEditorDraft.lengthMinutes,
+                recurrence: recurrence
+            )
+        }
+        isEventEditorPresented = false
+    }
+
+    private func defaultStartDate(on day: Date) -> Date {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: day)
+        let dayEnd = calendar.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400)
+        let defaultStart = calendar.date(byAdding: .hour, value: 9, to: dayStart) ?? dayStart
+
+        let lastEnd = events(on: day).map(\.end).max()
+        var start = max(defaultStart, lastEnd ?? defaultStart)
+        if start >= dayEnd {
+            start = calendar.date(byAdding: .hour, value: 23, to: dayStart) ?? dayStart
+        }
+        return start
+    }
+
+    private func recurrenceChoice(from recurrence: CalendarEvent.Recurrence?) -> RecurrenceChoice {
+        guard let recurrence else { return .none }
+        switch recurrence.frequency {
+        case .daily: return .daily
+        case .weekly: return .weekly
+        case .monthly: return .monthly
+        case .yearly: return .yearly
+        }
+    }
+
+    private func recurrenceFromDraft() -> CalendarEvent.Recurrence? {
+        switch eventEditorDraft.recurrence {
+        case .none:
+            return nil
+        case .daily:
+            return CalendarEvent.Recurrence(frequency: .daily, interval: eventEditorDraft.recurrenceInterval)
+        case .weekly:
+            return CalendarEvent.Recurrence(frequency: .weekly, interval: eventEditorDraft.recurrenceInterval)
+        case .monthly:
+            return CalendarEvent.Recurrence(frequency: .monthly, interval: eventEditorDraft.recurrenceInterval)
+        case .yearly:
+            return CalendarEvent.Recurrence(frequency: .yearly, interval: eventEditorDraft.recurrenceInterval)
+        }
+    }
+
+    private func lengthLabel(minutes: Int) -> String {
+        if minutes < 60 {
+            return "\(minutes) min"
+        }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if remainder == 0 {
+            return "\(hours) hr"
+        }
+        return "\(hours) hr \(remainder) min"
+    }
+
+    private func recurrenceIntervalLabel() -> String {
+        let value = max(1, eventEditorDraft.recurrenceInterval)
+        switch eventEditorDraft.recurrence {
+        case .none:
+            return "Does not repeat"
+        case .daily:
+            return value == 1 ? "Every day" : "Every \(value) days"
+        case .weekly:
+            return value == 1 ? "Every week" : "Every \(value) weeks"
+        case .monthly:
+            return value == 1 ? "Every month" : "Every \(value) months"
+        case .yearly:
+            return value == 1 ? "Every year" : "Every \(value) years"
+        }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
+        let mode = store.doc.calendar.selectedView
+        let selectedID = periodID(for: selectedDay, mode: mode)
+        let periodIDs = Array((selectedID - periodWindowRadius)...(selectedID + periodWindowRadius))
+        let currentID = visiblePeriodID ?? selectedID
+        let currentIndex = periodIDs.firstIndex(of: currentID) ?? periodWindowRadius
+
+        GeometryReader { geo in
+            ZStack {
+                HStack(spacing: 0) {
+                    ForEach(periodIDs, id: \.self) { periodID in
+                        periodPage(periodID: periodID, mode: mode)
+                            .frame(width: geo.size.width, height: geo.size.height)
+                            .allowsHitTesting(periodID == currentID)
+                    }
+                }
+                .offset(x: -CGFloat(currentIndex) * geo.size.width + pagerDragOffset)
+
+                HorizontalPageScrollCaptureView { deltaX in
+                    guard abs(deltaX) > 0 else { return }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    guard now - lastWheelPageChangeTime >= wheelPageCooldown else { return }
+
+                    horizontalScrollAccumulator += deltaX
+                    let threshold = wheelPageThreshold
+
+                    if horizontalScrollAccumulator <= -threshold {
+                        horizontalScrollAccumulator = 0
+                        lastWheelPageChangeTime = now
+                        advancePage(periodIDs: periodIDs, by: 1)
+                    } else if horizontalScrollAccumulator >= threshold {
+                        horizontalScrollAccumulator = 0
+                        lastWheelPageChangeTime = now
+                        advancePage(periodIDs: periodIDs, by: -1)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+            .contentShape(Rectangle())
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 8)
+                    .onChanged { value in
+                        guard abs(value.translation.width) >= abs(value.translation.height) else { return }
+                        pagerDragOffset = value.translation.width
+                    }
+                    .onEnded { value in
+                        let projected = value.predictedEndTranslation.width
+                        snapToNearestPage(
+                            periodIDs: periodIDs,
+                            currentIndex: currentIndex,
+                            pageWidth: max(1, geo.size.width),
+                            translationWidth: value.translation.width,
+                            projectedWidth: projected
+                        )
+                    }
+            )
+            .clipped()
+        }
+        .onAppear {
+            visiblePeriodID = selectedID
+            pagerDragOffset = 0
+            horizontalScrollAccumulator = 0
+            lastWheelPageChangeTime = 0
+        }
+        .onChange(of: mode) { newMode in
+            let id = periodID(for: selectedDay, mode: newMode)
+            if visiblePeriodID != id {
+                visiblePeriodID = id
+            }
+            pagerDragOffset = 0
+            horizontalScrollAccumulator = 0
+            lastWheelPageChangeTime = 0
+        }
+        .onChange(of: store.doc.calendar.selectedDate) { _ in
+            let id = periodID(for: selectedDay, mode: store.doc.calendar.selectedView)
+            if visiblePeriodID != id {
+                visiblePeriodID = id
+            }
+        }
+        .onChange(of: visiblePeriodID) { newID in
+            guard let newID else { return }
+            let startDate = periodStartDate(for: newID, mode: mode)
+            let dayStart = Calendar.current.startOfDay(for: startDate).timeIntervalSince1970
+            if store.doc.calendar.selectedDate != dayStart {
+                store.setCalendarSelectedDate(startDate)
+            }
+            pagerDragOffset = 0
+        }
+        .background(Color(NSColor.textBackgroundColor).opacity(0.55))
+    }
+
+    private func snapToNearestPage(
+        periodIDs: [Int],
+        currentIndex: Int,
+        pageWidth: CGFloat,
+        translationWidth: CGFloat,
+        projectedWidth: CGFloat
+    ) {
+        let threshold = pageWidth * 0.2
+        var step = 0
+
+        if projectedWidth <= -threshold || translationWidth <= -threshold {
+            step = 1
+        } else if projectedWidth >= threshold || translationWidth >= threshold {
+            step = -1
+        }
+
+        let nextIndex = min(max(currentIndex + step, 0), periodIDs.count - 1)
+        withAnimation(.easeOut(duration: 0.18)) {
+            visiblePeriodID = periodIDs[nextIndex]
+            pagerDragOffset = 0
+        }
+    }
+
+    private func advancePage(periodIDs: [Int], by step: Int) {
+        guard !periodIDs.isEmpty else { return }
+        let fallback = periodIDs[min(periodWindowRadius, max(periodIDs.count - 1, 0))]
+        let currentID = visiblePeriodID ?? fallback
+        guard let currentIndex = periodIDs.firstIndex(of: currentID) else { return }
+        let nextIndex = min(max(currentIndex + step, 0), periodIDs.count - 1)
+        guard nextIndex != currentIndex else { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            visiblePeriodID = periodIDs[nextIndex]
+            pagerDragOffset = 0
+        }
+    }
+
+    @ViewBuilder
+    private func periodPage(periodID: Int, mode: CalendarViewMode) -> some View {
+        switch mode {
+        case .day:
+            schedulePeriodPage(startDate: periodStartDate(for: periodID, mode: .day), dayCount: 1)
+        case .threeDays:
+            schedulePeriodPage(startDate: periodStartDate(for: periodID, mode: .threeDays), dayCount: 3)
+        case .week:
+            schedulePeriodPage(startDate: periodStartDate(for: periodID, mode: .week), dayCount: 7)
+        case .month:
+            monthView(for: periodStartDate(for: periodID, mode: .month))
+        case .year:
+            yearView(for: periodStartDate(for: periodID, mode: .year))
+        }
+    }
+
+    private func schedulePeriodPage(startDate: Date, dayCount: Int) -> some View {
+        let days = (0..<dayCount).compactMap { Calendar.current.date(byAdding: .day, value: $0, to: startDate) }
+
+        return ScrollView {
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(days, id: \.self) { day in
+                    scheduleDayColumn(day)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func scheduleDayColumn(_ day: Date) -> some View {
+        let dayEvents = events(on: day)
+        let isSelected = Calendar.current.isDate(day, inSameDayAs: selectedDay)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(Self.shortDayFormatter.string(from: day))
+                    .font(.system(size: 15, weight: .bold))
+                Spacer()
+                Text("\(dayEvents.count)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            VStack(spacing: 0) {
+                ForEach(0..<24, id: \.self) { hour in
+                    scheduleHourRow(day: day, hour: hour)
+                }
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(NSColor.windowBackgroundColor).opacity(0.92))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(
+                    isSelected ? Color.accentColor.opacity(0.85) : Color(NSColor.separatorColor).opacity(0.72),
+                    lineWidth: isSelected ? 1.4 : 1
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture {
+            store.setCalendarSelectedDate(day)
+        }
+    }
+
+    private func scheduleHourRow(day: Date, hour: Int) -> some View {
+        let eventsInHour = eventsInHour(on: day, hour: hour)
+
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(hourLabel(hour))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                Rectangle()
+                    .fill(Color(NSColor.separatorColor).opacity(0.5))
+                    .frame(height: 1)
+            }
+
+            if eventsInHour.isEmpty {
+                Spacer(minLength: 0)
+            } else {
+                ForEach(eventsInHour) { event in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(event.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(2)
+                        Text(timeRange(for: event))
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(Color.accentColor.opacity(0.16))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color.accentColor.opacity(0.45), lineWidth: 0.8)
+                    )
+                    .contextMenu {
+                        Button("Edit Event") {
+                            presentEventEditor(eventID: event.sourceID, preferredStart: event.start)
+                        }
+                        Divider()
+                        Button("Delete Event", role: .destructive) {
+                            store.deleteCalendarEvent(id: event.sourceID)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(minHeight: 56, alignment: .topLeading)
+    }
+
+    private func monthView(for monthDate: Date) -> some View {
+        let cells = monthCells(for: monthDate)
+        let symbols = weekdaySymbols()
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(Self.monthHeaderFormatter.string(from: monthDate))
+                    .font(.system(size: 24, weight: .bold))
+
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 7), spacing: 8) {
+                    ForEach(symbols, id: \.self) { symbol in
+                        Text(symbol)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                    }
+
+                    ForEach(Array(cells.enumerated()), id: \.offset) { _, date in
+                        monthCell(date)
+                    }
+                }
+            }
+            .padding(14)
+        }
+        .background(Color(NSColor.textBackgroundColor).opacity(0.55))
+    }
+
+    private func monthCell(_ date: Date?) -> some View {
+        Group {
+            if let date {
+                let day = Calendar.current.component(.day, from: date)
+                let count = events(on: date).count
+                let isSelected = Calendar.current.isDate(date, inSameDayAs: selectedDay)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(day)")
+                        .font(.system(size: 13, weight: .semibold))
+                    if count > 0 {
+                        Text("\(count) event\(count == 1 ? "" : "s")")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, minHeight: 74, alignment: .topLeading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(NSColor.controlBackgroundColor).opacity(0.8))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            isSelected ? Color.accentColor.opacity(0.9) : Color(NSColor.separatorColor).opacity(0.75),
+                            lineWidth: isSelected ? 1.4 : 1
+                        )
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+                .onTapGesture {
+                    store.setCalendarSelectedDate(date)
+                }
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, minHeight: 74)
+            }
+        }
+    }
+
+    private func yearView(for yearDate: Date) -> some View {
+        let year = Calendar.current.component(.year, from: yearDate)
+        let monthNames = Calendar.current.monthSymbols
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("\(year)")
+                    .font(.system(size: 24, weight: .bold))
+
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
+                    ForEach(1...12, id: \.self) { month in
+                        let count = eventCount(year: year, month: month)
+                        Button {
+                            openMonth(year: year, month: month)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(monthNames[month - 1])
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("\(count) event\(count == 1 ? "" : "s")")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, minHeight: 90, alignment: .topLeading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.8))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(Color(NSColor.separatorColor).opacity(0.75), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(14)
+        }
+        .background(Color(NSColor.textBackgroundColor).opacity(0.55))
+    }
+
+    private func periodID(for date: Date, mode: CalendarViewMode) -> Int {
+        let calendar = Calendar.current
+        switch mode {
+        case .day:
+            return calendar.dateComponents([.day], from: referenceDay, to: calendar.startOfDay(for: date)).day ?? 0
+        case .threeDays:
+            let dayID = periodID(for: date, mode: .day)
+            return floorDiv(dayID, 3)
+        case .week:
+            let weekStart = calendar.dateInterval(of: .weekOfYear, for: date)?.start ?? calendar.startOfDay(for: date)
+            return calendar.dateComponents([.weekOfYear], from: referenceWeekStart, to: weekStart).weekOfYear ?? 0
+        case .month:
+            let components = calendar.dateComponents([.year, .month], from: date)
+            guard let year = components.year, let month = components.month else { return 0 }
+            let absoluteMonth = year * 12 + (month - 1)
+            return absoluteMonth - referenceYear * 12
+        case .year:
+            let year = calendar.component(.year, from: date)
+            return year - referenceYear
+        }
+    }
+
+    private func periodStartDate(for id: Int, mode: CalendarViewMode) -> Date {
+        let calendar = Calendar.current
+        switch mode {
+        case .day:
+            return calendar.date(byAdding: .day, value: id, to: referenceDay) ?? referenceDay
+        case .threeDays:
+            let startDayID = id * 3
+            return periodStartDate(for: startDayID, mode: .day)
+        case .week:
+            return calendar.date(byAdding: .weekOfYear, value: id, to: referenceWeekStart) ?? referenceWeekStart
+        case .month:
+            let absoluteMonth = referenceYear * 12 + id
+            let year = floorDiv(absoluteMonth, 12)
+            let monthIndex = absoluteMonth - year * 12
+            var components = DateComponents()
+            components.year = year
+            components.month = monthIndex + 1
+            components.day = 1
+            return calendar.date(from: components) ?? referenceDay
+        case .year:
+            var components = DateComponents()
+            components.year = referenceYear + id
+            components.month = 1
+            components.day = 1
+            return calendar.date(from: components) ?? referenceDay
+        }
+    }
+
+    private var referenceDay: Date {
+        Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 0))
+    }
+
+    private var referenceWeekStart: Date {
+        let calendar = Calendar.current
+        return calendar.dateInterval(of: .weekOfYear, for: referenceDay)?.start ?? referenceDay
+    }
+
+    private func floorDiv(_ lhs: Int, _ rhs: Int) -> Int {
+        precondition(rhs != 0)
+        var quotient = lhs / rhs
+        let remainder = lhs % rhs
+        if remainder != 0 && ((remainder > 0) != (rhs > 0)) {
+            quotient -= 1
+        }
+        return quotient
+    }
+
+    private func events(on day: Date) -> [CalendarEventOccurrence] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: day)
+
+        var occurrences: [CalendarEventOccurrence] = []
+        for event in store.doc.calendar.events {
+            guard let start = occurrenceStart(for: event, on: dayStart) else { continue }
+            let duration = max(300, event.endAt - event.startAt)
+            let end = start.addingTimeInterval(duration)
+            occurrences.append(CalendarEventOccurrence(
+                sourceID: event.id,
+                title: event.title,
+                start: start,
+                end: end
+            ))
+        }
+
+        return occurrences.sorted { $0.start < $1.start }
+    }
+
+    private func eventsInHour(on day: Date, hour: Int) -> [CalendarEventOccurrence] {
+        events(on: day).filter {
+            Calendar.current.component(.hour, from: $0.start) == hour
+        }
+    }
+
+    private func occurrenceStart(for event: CalendarEvent, on day: Date) -> Date? {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: day)
+        let eventStart = Date(timeIntervalSince1970: event.startAt)
+        let eventDayStart = calendar.startOfDay(for: eventStart)
+        guard dayStart >= eventDayStart else { return nil }
+
+        let time = calendar.dateComponents([.hour, .minute, .second], from: eventStart)
+        func dateWithEventTime(_ baseDay: Date) -> Date {
+            calendar.date(
+                bySettingHour: time.hour ?? 0,
+                minute: time.minute ?? 0,
+                second: time.second ?? 0,
+                of: baseDay
+            ) ?? baseDay
+        }
+
+        guard let recurrence = event.recurrence else {
+            return calendar.isDate(dayStart, inSameDayAs: eventDayStart) ? dateWithEventTime(dayStart) : nil
+        }
+
+        let interval = max(1, recurrence.interval)
+        switch recurrence.frequency {
+        case .daily:
+            let diffDays = calendar.dateComponents([.day], from: eventDayStart, to: dayStart).day ?? -1
+            guard diffDays >= 0, diffDays % interval == 0 else { return nil }
+            return dateWithEventTime(dayStart)
+
+        case .weekly:
+            let diffDays = calendar.dateComponents([.day], from: eventDayStart, to: dayStart).day ?? -1
+            guard diffDays >= 0, diffDays % 7 == 0 else { return nil }
+            let weeks = diffDays / 7
+            guard weeks % interval == 0 else { return nil }
+            return dateWithEventTime(dayStart)
+
+        case .monthly:
+            let eventComponents = calendar.dateComponents([.year, .month, .day], from: eventDayStart)
+            let dayComponents = calendar.dateComponents([.year, .month, .day], from: dayStart)
+            guard let eventYear = eventComponents.year,
+                  let eventMonth = eventComponents.month,
+                  let eventDay = eventComponents.day,
+                  let dayYear = dayComponents.year,
+                  let dayMonth = dayComponents.month,
+                  let currentDay = dayComponents.day else { return nil }
+            guard currentDay == eventDay else { return nil }
+            let monthDiff = (dayYear - eventYear) * 12 + (dayMonth - eventMonth)
+            guard monthDiff >= 0, monthDiff % interval == 0 else { return nil }
+            return dateWithEventTime(dayStart)
+
+        case .yearly:
+            let eventComponents = calendar.dateComponents([.year, .month, .day], from: eventDayStart)
+            let dayComponents = calendar.dateComponents([.year, .month, .day], from: dayStart)
+            guard let eventYear = eventComponents.year,
+                  let eventMonth = eventComponents.month,
+                  let eventDay = eventComponents.day,
+                  let dayYear = dayComponents.year,
+                  let dayMonth = dayComponents.month,
+                  let currentDay = dayComponents.day else { return nil }
+            guard dayMonth == eventMonth, currentDay == eventDay else { return nil }
+            let yearDiff = dayYear - eventYear
+            guard yearDiff >= 0, yearDiff % interval == 0 else { return nil }
+            return dateWithEventTime(dayStart)
+        }
+    }
+
+    private func timeRange(for event: CalendarEventOccurrence) -> String {
+        "\(Self.timeFormatter.string(from: event.start)) - \(Self.timeFormatter.string(from: event.end))"
+    }
+
+    private func monthCells(for day: Date) -> [Date?] {
+        let calendar = Calendar.current
+        guard let monthInterval = calendar.dateInterval(of: .month, for: day) else { return [] }
+        let firstDay = monthInterval.start
+        let daysInMonth = calendar.range(of: .day, in: .month, for: firstDay)?.count ?? 0
+
+        let weekday = calendar.component(.weekday, from: firstDay)
+        let leading = (weekday - calendar.firstWeekday + 7) % 7
+        var cells: [Date?] = Array(repeating: nil, count: leading)
+
+        for offset in 0..<daysInMonth {
+            if let date = calendar.date(byAdding: .day, value: offset, to: firstDay) {
+                cells.append(date)
+            }
+        }
+
+        let remainder = cells.count % 7
+        if remainder != 0 {
+            cells.append(contentsOf: Array(repeating: nil, count: 7 - remainder))
+        }
+        return cells
+    }
+
+    private func weekdaySymbols() -> [String] {
+        let calendar = Calendar.current
+        let symbols = calendar.shortWeekdaySymbols
+        let firstIndex = max(0, min(symbols.count - 1, calendar.firstWeekday - 1))
+        return Array(symbols[firstIndex...]) + Array(symbols[..<firstIndex])
+    }
+
+    private func eventCount(year: Int, month: Int) -> Int {
+        let calendar = Calendar.current
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = 1
+        guard let monthStart = calendar.date(from: components),
+              let dayRange = calendar.range(of: .day, in: .month, for: monthStart) else {
+            return 0
+        }
+
+        var total = 0
+        for day in dayRange {
+            if let date = calendar.date(byAdding: .day, value: day - 1, to: monthStart) {
+                total += events(on: date).count
+            }
+        }
+        return total
+    }
+
+    private func openMonth(year: Int, month: Int) {
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = 1
+
+        guard let monthStart = Calendar.current.date(from: components) else { return }
+        store.setCalendarSelectedDate(monthStart)
+        store.setCalendarViewMode(.month)
+    }
+
+    private func hourLabel(_ hour: Int) -> String {
+        let h = hour % 12 == 0 ? 12 : hour % 12
+        let period = hour < 12 ? "AM" : "PM"
+        return "\(h) \(period)"
+    }
+}
+
+private struct HorizontalPageScrollCaptureView: NSViewRepresentable {
+    var onHorizontalScroll: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = ScrollCaptureView()
+        view.onHorizontalScroll = onHorizontalScroll
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ScrollCaptureView)?.onHorizontalScroll = onHorizontalScroll
+    }
+
+    private final class ScrollCaptureView: NSView {
+        var onHorizontalScroll: ((CGFloat) -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+            guard let window else {
+                monitor = nil
+                return
+            }
+
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, event.window === window else { return event }
+                let point = self.convert(event.locationInWindow, from: nil)
+                guard self.bounds.contains(point) else { return event }
+
+                let dx = event.scrollingDeltaX
+                let dy = event.scrollingDeltaY
+                // Require a clearly horizontal gesture to avoid accidental paging while scrolling vertically.
+                guard abs(dx) > max(2, abs(dy) * 1.5) else { return event }
+
+                let normalizedDX: CGFloat
+                if event.hasPreciseScrollingDeltas {
+                    normalizedDX = dx
+                } else {
+                    normalizedDX = dx * 12
+                }
+
+                self.onHorizontalScroll?(normalizedDX)
+                return nil
+            }
+        }
+
+        deinit {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
+    }
+}
+
 struct NotesWorkspaceView: View {
     @EnvironmentObject var store: BoardStore
     @State private var expandedStacks: Set<UUID> = []
@@ -40,7 +1475,7 @@ struct NotesWorkspaceView: View {
     private var sidebarCollapsedBinding: Binding<Bool> {
         Binding(
             get: { store.doc.notes.sidebarCollapsed },
-            set: { store.doc.notes.sidebarCollapsed = $0 }
+            set: { store.setNotesSidebarCollapsed($0) }
         )
     }
 
@@ -66,7 +1501,7 @@ struct NotesWorkspaceView: View {
     private var sidebarCollapsed: Binding<Bool> {
         Binding(
             get: { store.doc.notes.sidebarCollapsed },
-            set: { store.doc.notes.sidebarCollapsed = $0 }
+            set: { store.setNotesSidebarCollapsed($0) }
         )
     }
 
@@ -80,7 +1515,7 @@ struct NotesWorkspaceView: View {
         VStack(spacing: 10) {
             WorkspaceModeSwitcher(mode: Binding(
                 get: { store.doc.ui.workspaceMode },
-                set: { store.doc.ui.workspaceMode = $0 }
+                set: { store.setWorkspaceMode($0) }
             ))
             .padding(.top, 10)
 
@@ -548,8 +1983,12 @@ struct NotesWorkspaceView: View {
         Binding(
             get: { selectedNote()?.title ?? "" },
             set: { newValue in
+                guard let noteID = store.doc.notes.selection.noteID else { return }
                 let clamped = String(newValue.prefix(NoteItem.maxTitleLength))
-                updateSelectedNote { $0.title = clamped }
+                _ = updateSelectedNote(noteID: noteID,
+                                       title: clamped,
+                                       body: nil,
+                                       coalescingKey: "note-title-\(noteID.uuidString)")
             }
         )
     }
@@ -557,95 +1996,25 @@ struct NotesWorkspaceView: View {
     private func bindingForSelectedNoteBody() -> Binding<String> {
         Binding(
             get: { selectedNote()?.body ?? "" },
-            set: { newValue in updateSelectedNote { $0.body = newValue } }
+            set: { newValue in
+                guard let noteID = store.doc.notes.selection.noteID else { return }
+                _ = updateSelectedNote(noteID: noteID,
+                                       title: nil,
+                                       body: newValue,
+                                       coalescingKey: "note-body-\(noteID.uuidString)")
+            }
         )
     }
 
-    private func updateSelectedNote(_ mutate: (inout NoteItem) -> Void) {
-        guard let areaID = store.doc.notes.selection.areaID,
-              let noteID = store.doc.notes.selection.noteID else { return }
+    @discardableResult
+    private func updateSelectedNote(noteID: UUID, title: String?, body: String?, coalescingKey: String) -> Bool {
         if store.isNoteLocked(noteID) && !store.isNoteUnlockedInSession(noteID) {
-            return
+            return false
         }
-
-        guard let aIdx = store.doc.notes.areas.firstIndex(where: { $0.id == areaID }) else { return }
-
-        let stackID = store.doc.notes.selection.stackID
-        let nbID = store.doc.notes.selection.notebookID
-        let secID = store.doc.notes.selection.sectionID
-
-        if let stackID {
-            guard let sIdx = store.doc.notes.areas[aIdx].stacks.firstIndex(where: { $0.id == stackID }) else { return }
-
-            // 1) Section note (stack)
-            if let nbID, let secID {
-                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-                guard let secIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else { return }
-                guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-
-                var note = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx]
-                mutate(&note)
-                note.updatedAt = Date().timeIntervalSince1970
-                store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx] = note
-                store.doc.updatedAt = note.updatedAt
-                return
-            }
-
-            // 2) Notebook root note (stack)
-            if let nbID {
-                guard let nbIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-                guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-
-                var note = store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes[nIdx]
-                mutate(&note)
-                note.updatedAt = Date().timeIntervalSince1970
-                store.doc.notes.areas[aIdx].stacks[sIdx].notebooks[nbIdx].notes[nIdx] = note
-                store.doc.updatedAt = note.updatedAt
-                return
-            }
-
-            // 3) Stack root note
-            guard let nIdx = store.doc.notes.areas[aIdx].stacks[sIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-            var note = store.doc.notes.areas[aIdx].stacks[sIdx].notes[nIdx]
-            mutate(&note)
-            note.updatedAt = Date().timeIntervalSince1970
-            store.doc.notes.areas[aIdx].stacks[sIdx].notes[nIdx] = note
-            store.doc.updatedAt = note.updatedAt
-            return
-        }
-
-        // Area-level notes
-        if let nbID, let secID {
-            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-            guard let secIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections.firstIndex(where: { $0.id == secID }) else { return }
-            guard let nIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-
-            var note = store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx]
-            mutate(&note)
-            note.updatedAt = Date().timeIntervalSince1970
-            store.doc.notes.areas[aIdx].notebooks[nbIdx].sections[secIdx].notes[nIdx] = note
-            store.doc.updatedAt = note.updatedAt
-            return
-        }
-
-        if let nbID {
-            guard let nbIdx = store.doc.notes.areas[aIdx].notebooks.firstIndex(where: { $0.id == nbID }) else { return }
-            guard let nIdx = store.doc.notes.areas[aIdx].notebooks[nbIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-
-            var note = store.doc.notes.areas[aIdx].notebooks[nbIdx].notes[nIdx]
-            mutate(&note)
-            note.updatedAt = Date().timeIntervalSince1970
-            store.doc.notes.areas[aIdx].notebooks[nbIdx].notes[nIdx] = note
-            store.doc.updatedAt = note.updatedAt
-            return
-        }
-
-        guard let nIdx = store.doc.notes.areas[aIdx].notes.firstIndex(where: { $0.id == noteID }) else { return }
-        var note = store.doc.notes.areas[aIdx].notes[nIdx]
-        mutate(&note)
-        note.updatedAt = Date().timeIntervalSince1970
-        store.doc.notes.areas[aIdx].notes[nIdx] = note
-        store.doc.updatedAt = note.updatedAt
+        return store.updateNote(noteID: noteID,
+                                title: title,
+                                body: body,
+                                undoCoalescingKey: coalescingKey)
     }
 
     // ---- creation ----
@@ -2348,7 +3717,7 @@ struct NotesSidebarTree: View {
         HStack(spacing: 10) {
             WorkspaceModeSwitcher(mode: Binding(
                 get: { store.doc.ui.workspaceMode },
-                set: { store.doc.ui.workspaceMode = $0 }
+                set: { store.setWorkspaceMode($0) }
             ))
 
             Spacer()

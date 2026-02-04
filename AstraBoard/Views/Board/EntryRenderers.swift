@@ -1484,36 +1484,6 @@ private struct ImageCropOverlay: View {
     }
 }
 
-// MARK: - BoardStore helpers (Image Crop)
-
-extension BoardStore {
-    func beginImageCrop(_ id: UUID) {
-        select(id)
-        doc.ui.activeImageCropID = id
-    }
-
-    func endImageCrop() {
-        doc.ui.activeImageCropID = nil
-    }
-
-    func resetImageCrop(_ id: UUID) {
-        guard var e = doc.entries[id] else { return }
-        e.imageCrop = nil
-        doc.entries[id] = e
-    }
-
-    /// Updates the crop for an image entry. `recordUndo` is accepted for API consistency,
-    /// but this implementation simply mutates the doc.
-    func setImageCrop(_ id: UUID,
-                      crop: ImageCropInsets,
-                      recordUndo: Bool,
-                      fallbackUndoFrom: ImageCropInsets? = nil) {
-        guard var e = doc.entries[id] else { return }
-        e.imageCrop = crop.clamped()
-        doc.entries[id] = e
-    }
-}
-
 extension View {
     func cursor(_ cursor: NSCursor) -> some View {
         self.onHover { hovering in
