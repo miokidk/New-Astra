@@ -1075,7 +1075,7 @@ actor VisionToolManager {
         process.executableURL = executableURL
         process.arguments = [
             "launch",
-            "--model-path", "mlx-community/Qwen2-VL-2B-Instruct-4bit",
+            "--model-path", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit",
             "--model-type", "multimodal",
             "--host", "127.0.0.1",
             "--port", "8000"
@@ -1162,18 +1162,27 @@ actor VisionToolManager {
     }
 
     private func selectModelId(from list: ModelList) -> String? {
-        if list.data.contains(where: { $0.id == "local-multimodal" }) {
-            return "local-multimodal"
-        }
-        if list.data.contains(where: { $0.id == "mlx-community/Qwen2-VL-2B-Instruct-4bit" }) {
-            return "mlx-community/Qwen2-VL-2B-Instruct-4bit"
-        }
+        // Do not hardcode an alias; always use the server-reported model id.
+        // If multiple models are present, prefer the first (mlx-openai-server typically returns the active one).
         return list.data.first?.id
     }
 
     // MARK: - Request/Response
 
     private func sendChat(model: String, prompt: String, imageDataURIs: [String]) async throws -> String {
+        do {
+            return try await sendChatInternal(model: model, prompt: prompt, imageDataURIs: imageDataURIs, useResponseFormat: true)
+        } catch {
+            return try await sendChatInternal(model: model, prompt: prompt, imageDataURIs: imageDataURIs, useResponseFormat: false)
+        }
+    }
+
+    private func sendChatInternal(
+        model: String,
+        prompt: String,
+        imageDataURIs: [String],
+        useResponseFormat: Bool
+    ) async throws -> String {
         var content: [[String: Any]] = [
             ["type": "text", "text": prompt]
         ]
@@ -1184,7 +1193,7 @@ actor VisionToolManager {
             ])
         }
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": model,
             "messages": [
                 [
@@ -1192,9 +1201,12 @@ actor VisionToolManager {
                     "content": content
                 ]
             ],
-            "temperature": 0.1,
+            "temperature": 0.0,
             "max_tokens": 900
         ]
+        if useResponseFormat {
+            body["response_format"] = ["type": "json_object"]
+        }
 
         let data = try JSONSerialization.data(withJSONObject: body)
         var request = URLRequest(url: chatURL)
@@ -1203,7 +1215,10 @@ actor VisionToolManager {
         request.httpBody = data
 
         let (respData, response) = try await Self.session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let http = response as? HTTPURLResponse else {
+            throw VisionError.invalidResponse
+        }
+        guard http.statusCode == 200 else {
             throw VisionError.invalidResponse
         }
         let decoded = try JSONDecoder().decode(ChatResponse.self, from: respData)
@@ -1276,7 +1291,8 @@ actor VisionToolManager {
           "confidence": number (0..1)
         }
         Rules:
-        - Do not include any markdown or code fences.
+        - Output a single JSON object on one line. No markdown or code fences.
+        - Do not add extra keys or commentary.
         - "ocr_text" must include all visible text in reading order, or "" if none.
         - "visual_details" should be a list of concrete, factual observations (max 12 items).
         - "ui_elements" should include buttons, fields, menus, icons, etc when present; use [] if none (max 12 items).
@@ -1290,7 +1306,7 @@ actor VisionToolManager {
         }
 
         if strict {
-            prompt += "\nReturn ONLY valid JSON. No markdown."
+            prompt += "\nReturn ONLY valid JSON. No markdown. No trailing commas."
         }
 
         return prompt
@@ -1299,8 +1315,9 @@ actor VisionToolManager {
     private static func decodePayload(from text: String) throws -> VisionToolPayload {
         let cleaned = stripMarkdownCodeFence(text)
         let candidate = extractJSONObject(from: cleaned) ?? cleaned
+        let repaired = repairJSON(candidate)
 
-        guard let data = candidate.data(using: .utf8) else {
+        guard let data = repaired.data(using: .utf8) else {
             throw VisionError.invalidJSON("Unreadable response.")
         }
 
@@ -1310,6 +1327,10 @@ actor VisionToolManager {
 
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return coercePayload(from: obj)
+        }
+
+        if let fallback = extractPayloadFromText(cleaned) {
+            return fallback
         }
 
         throw VisionError.invalidJSON("Invalid JSON.")
@@ -1344,6 +1365,168 @@ actor VisionToolManager {
                     }
                 }
             }
+        }
+        return nil
+    }
+
+    private static func repairJSON(_ text: String) -> String {
+        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        cleaned = removeTrailingCommas(cleaned)
+        cleaned = appendMissingClosers(cleaned)
+        return cleaned
+    }
+
+    private static func removeTrailingCommas(_ text: String) -> String {
+        var out = ""
+        var i = text.startIndex
+        while i < text.endIndex {
+            let ch = text[i]
+            if ch == "," {
+                var j = text.index(after: i)
+                while j < text.endIndex, text[j].isWhitespace {
+                    j = text.index(after: j)
+                }
+                if j < text.endIndex, (text[j] == "}" || text[j] == "]") {
+                    i = text.index(after: i)
+                    continue
+                }
+            }
+            out.append(ch)
+            i = text.index(after: i)
+        }
+        return out
+    }
+
+    private static func appendMissingClosers(_ text: String) -> String {
+        var stack: [Character] = []
+        var inString = false
+        var escape = false
+        for ch in text {
+            if inString {
+                if escape {
+                    escape = false
+                } else if ch == "\\" {
+                    escape = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+                continue
+            }
+            if ch == "\"" { inString = true; continue }
+            if ch == "{" || ch == "[" { stack.append(ch) }
+            if ch == "}" || ch == "]" {
+                if let last = stack.last {
+                    if (ch == "}" && last == "{") || (ch == "]" && last == "[") {
+                        stack.removeLast()
+                    }
+                }
+            }
+        }
+        if stack.isEmpty { return text }
+
+        var suffix = ""
+        for ch in stack.reversed() {
+            suffix.append(ch == "{" ? "}" : "]")
+        }
+        return text + suffix
+    }
+
+    private static func extractPayloadFromText(_ text: String) -> VisionToolPayload? {
+        let caption = extractStringField(from: text, key: "caption") ?? ""
+        let ocrText = extractStringField(from: text, key: "ocr_text") ?? ""
+        let visualDetails = extractStringArray(from: text, key: "visual_details", limit: 12)
+        let uiElements: [VisionToolPayload.UIElement] = []
+        let confidence = extractNumberField(from: text, key: "confidence") ?? 0.0
+
+        if caption.isEmpty && ocrText.isEmpty && visualDetails.isEmpty {
+            return nil
+        }
+
+        return VisionToolPayload(
+            caption: caption,
+            ocrText: ocrText,
+            visualDetails: visualDetails,
+            uiElements: uiElements,
+            confidence: confidence
+        )
+    }
+
+    private static func extractStringField(from text: String, key: String) -> String? {
+        guard let range = text.range(of: "\"\(key)\"") else { return nil }
+        guard let colon = text[range.upperBound...].firstIndex(of: ":") else { return nil }
+        var idx = text.index(after: colon)
+        while idx < text.endIndex, text[idx].isWhitespace { idx = text.index(after: idx) }
+        guard idx < text.endIndex, text[idx] == "\"" else { return nil }
+        return parseJSONString(in: text, start: idx)?.value
+    }
+
+    private static func extractNumberField(from text: String, key: String) -> Double? {
+        guard let range = text.range(of: "\"\(key)\"") else { return nil }
+        guard let colon = text[range.upperBound...].firstIndex(of: ":") else { return nil }
+        var idx = text.index(after: colon)
+        while idx < text.endIndex, text[idx].isWhitespace { idx = text.index(after: idx) }
+        var end = idx
+        while end < text.endIndex, "0123456789.-".contains(text[end]) {
+            end = text.index(after: end)
+        }
+        let slice = text[idx..<end]
+        return Double(slice)
+    }
+
+    private static func extractStringArray(from text: String, key: String, limit: Int) -> [String] {
+        guard let range = text.range(of: "\"\(key)\"") else { return [] }
+        guard let colon = text[range.upperBound...].firstIndex(of: ":") else { return [] }
+        var idx = text.index(after: colon)
+        while idx < text.endIndex, text[idx].isWhitespace { idx = text.index(after: idx) }
+        guard idx < text.endIndex, text[idx] == "[" else { return [] }
+        idx = text.index(after: idx)
+
+        var out: [String] = []
+        while idx < text.endIndex, out.count < limit {
+            while idx < text.endIndex, text[idx].isWhitespace || text[idx] == "," {
+                idx = text.index(after: idx)
+            }
+            if idx < text.endIndex, text[idx] == "]" { break }
+            if idx < text.endIndex, text[idx] == "\"" {
+                if let parsed = parseJSONString(in: text, start: idx) {
+                    out.append(parsed.value)
+                    idx = parsed.nextIndex
+                    continue
+                }
+            }
+            // Skip unknown tokens
+            idx = text.index(after: idx)
+        }
+        return out
+    }
+
+    private static func parseJSONString(in text: String, start: String.Index) -> (value: String, nextIndex: String.Index)? {
+        guard text[start] == "\"" else { return nil }
+        var idx = text.index(after: start)
+        var out = ""
+        var escape = false
+        while idx < text.endIndex {
+            let ch = text[idx]
+            if escape {
+                switch ch {
+                case "\"": out.append("\"")
+                case "\\": out.append("\\")
+                case "n": out.append("\n")
+                case "t": out.append("\t")
+                case "r": out.append("\r")
+                case "/": out.append("/")
+                default: out.append(ch)
+                }
+                escape = false
+            } else if ch == "\\" {
+                escape = true
+            } else if ch == "\"" {
+                let next = text.index(after: idx)
+                return (out, next)
+            } else {
+                out.append(ch)
+            }
+            idx = text.index(after: idx)
         }
         return nil
     }

@@ -350,9 +350,7 @@ final class PersistenceService {
 
     private func readData(at url: URL) -> Data? {
         guard fm.fileExists(atPath: url.path) else { return nil }
-        if fm.isUbiquitousItem(at: url) {
-            try? fm.startDownloadingUbiquitousItem(at: url)
-        }
+        waitForUbiquitousItemIfNeeded(at: url, timeout: 1.0)
         return try? Data(contentsOf: url)
     }
 
@@ -361,6 +359,24 @@ final class PersistenceService {
         let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
         if values?.ubiquitousItemDownloadingStatus != URLUbiquitousItemDownloadingStatus.current {
             try? fm.startDownloadingUbiquitousItem(at: url)
+        }
+    }
+
+    private func isUbiquitousItemReady(at url: URL) -> Bool {
+        guard fm.isUbiquitousItem(at: url) else { return true }
+        let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+        let status = values?.ubiquitousItemDownloadingStatus
+        return status == .current || status == .downloaded
+    }
+
+    private func waitForUbiquitousItemIfNeeded(at url: URL, timeout: TimeInterval) {
+        guard fm.isUbiquitousItem(at: url) else { return }
+        if isUbiquitousItemReady(at: url) { return }
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            try? fm.startDownloadingUbiquitousItem(at: url)
+            if isUbiquitousItemReady(at: url) { return }
+            Thread.sleep(forTimeInterval: 0.1)
         }
     }
 
@@ -456,6 +472,13 @@ final class PersistenceService {
     /// Ensures at least one board exists and returns the default board id to open on launch.
     func defaultBoardId() -> UUID {
         var idx = loadIndex()
+        if idx.activeBoardId == nil && idx.boards.isEmpty {
+            let url = boardsIndexURL
+            if fm.fileExists(atPath: url.path), !isUbiquitousItemReady(at: url) {
+                waitForUbiquitousItemIfNeeded(at: url, timeout: 3.0)
+                idx = loadIndex()
+            }
+        }
 
         if let active = idx.activeBoardId {
             return active
@@ -558,6 +581,23 @@ final class PersistenceService {
         if let doc = loadBoardDoc(id: id) {
             setActiveBoard(id: id)
             return doc
+        }
+
+        let url = boardDocURL(for: id)
+        if fm.fileExists(atPath: url.path) {
+            if !isUbiquitousItemReady(at: url) {
+                waitForUbiquitousItemIfNeeded(at: url, timeout: 3.0)
+                if let doc = loadBoardDoc(id: id) {
+                    setActiveBoard(id: id)
+                    return doc
+                }
+            }
+            var placeholder = BoardDoc.defaultDoc()
+            placeholder.id = id
+            if let meta = boardMeta(id: id) {
+                placeholder.title = meta.title
+            }
+            return placeholder
         }
 
         var idx = loadIndex()
